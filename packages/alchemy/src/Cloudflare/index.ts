@@ -1,4 +1,5 @@
 export * from "./ApiToken/index.ts";
+export * from "./Alerting/index.ts";
 export * from "./Artifacts/index.ts";
 export * from "./AiGateway/index.ts";
 export * from "./CloudflareEnvironment.ts";

@@ -12,6 +12,7 @@ import { CredentialsStoreLive } from "../Auth/Credentials.ts";
 import { ProfileLive } from "../Auth/Profile.ts";
 import { Random, RandomProvider } from "../Random.ts";
 import * as Access from "./Access.ts";
+import * as Alerting from "./Alerting/index.ts";
 import * as AiGateway from "./AiGateway/index.ts";
 import * as ApiToken from "./ApiToken/index.ts";
 import * as Artifacts from "./Artifacts/index.ts";
@@ -48,6 +49,7 @@ export const providers = () =>
     Provider.collection([
       ApiToken.AccountApiToken,
       ApiToken.UserApiToken,
+      Alerting.Webhook,
       AiGateway.AiGateway,
       AiGateway.AiGatewayBindingPolicy,
       Artifacts.ArtifactsBindingPolicy,
@@ -82,6 +84,7 @@ export const providers = () =>
       Layer.mergeAll(
         ApiToken.AccountApiTokenProvider(),
         ApiToken.UserApiTokenProvider(),
+        Alerting.WebhookProvider(),
         AiGateway.AiGatewayProvider(),
         AiGateway.AiGatewayBindingPolicyLive,
         Artifacts.ArtifactsBindingPolicyLive,
