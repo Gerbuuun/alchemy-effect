@@ -10,10 +10,10 @@ import {
   WorkflowEvent as WorkflowEventService,
   type WorkflowExport,
   type WorkflowImpl,
-  type WorkflowRollbackOptions,
   WorkflowStep,
   WorkflowStepContext,
   type WorkflowStepConfig,
+  type WorkflowTaskOptions,
 } from "./Workflow.ts";
 
 /**
@@ -120,12 +120,10 @@ const wrapWorkflowEvent = (event: any): WorkflowEventService["Service"] => ({
 });
 
 const wrapWorkflowStep = (step: any): WorkflowStep["Service"] => ({
-  do: <T>(
-    name: string,
-    effect: Effect.Effect<T>,
-    config?: WorkflowStepConfig,
-    options?: WorkflowRollbackOptions<T>,
-  ): Effect.Effect<T> => {
+  do: <T>(options: WorkflowTaskOptions<T, any, any>): Effect.Effect<T> => {
+    const { name, effect } = options;
+    const config = toWorkflowStepConfig(options);
+    const rollbackEffect = options.rollback;
     const callback = (context: any) =>
       Effect.runPromise(
         effect.pipe(
@@ -136,11 +134,11 @@ const wrapWorkflowStep = (step: any): WorkflowStep["Service"] => ({
           }),
         ),
       );
-    const rollback = options
+    const rollback = rollbackEffect
       ? {
           rollback: (context: any) =>
             Effect.runPromise(
-              options.rollback({
+              rollbackEffect({
                 error: context.error,
                 output: context.output,
               }),
@@ -167,3 +165,10 @@ const wrapWorkflowStep = (step: any): WorkflowStep["Service"] => ({
   waitForEvent: <T>(name: string, options: any): Effect.Effect<T> =>
     Effect.tryPromise(() => step.waitForEvent(name, options) as Promise<T>),
 });
+
+const toWorkflowStepConfig = (
+  options: WorkflowTaskOptions,
+): WorkflowStepConfig | undefined => {
+  if (!options.retries && !options.timeout) return undefined;
+  return { retries: options.retries, timeout: options.timeout };
+};
