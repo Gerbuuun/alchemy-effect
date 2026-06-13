@@ -20,10 +20,6 @@ export default class TestWorkflow extends Cloudflare.Workflow<TestWorkflow>()(
 
       const greeted = yield* Cloudflare.task(
         "greet",
-        {
-          retries: { limit: 3, delay: "1 second", backoff: "linear" },
-          timeout: "1 minute",
-        },
         Effect.gen(function* () {
           const context = yield* Cloudflare.WorkflowStepContext;
           return {
@@ -31,6 +27,10 @@ export default class TestWorkflow extends Cloudflare.Workflow<TestWorkflow>()(
             attempt: context.attempt,
           };
         }),
+        {
+          retries: { limit: 3, delay: "1 second", backoff: "linear" },
+          timeout: "1 minute",
+        },
       );
 
       if (input.wait) {

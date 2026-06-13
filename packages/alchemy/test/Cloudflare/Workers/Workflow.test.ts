@@ -50,13 +50,14 @@ const waitForStatus = (
   client: HttpClient.HttpClient,
   url: string,
   id: string,
+  until: (status: WorkflowStatus) => boolean = isTerminal,
 ) =>
   client.get(`${url}/workflow/status/${id}`).pipe(
     Effect.flatMap((res) => res.json),
     Effect.map((json) => json as unknown as WorkflowStatus),
     Effect.repeat({
       schedule: Schedule.spaced("2 seconds"),
-      until: isTerminal,
+      until,
       times: 30,
     }),
   );
@@ -143,6 +144,14 @@ test(
       }),
     );
     const { instanceId } = (yield* startRes.json) as { instanceId: string };
+
+    const waitingStatus = yield* waitForStatus(
+      client,
+      url,
+      instanceId,
+      (status) => status.status === "waiting" || isTerminal(status),
+    );
+    expect(waitingStatus.status).toBe("waiting");
 
     const sendRes = yield* client.post(
       `${url}/workflow/send/${instanceId}/external-ok`,

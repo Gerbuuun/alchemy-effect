@@ -18,13 +18,15 @@ export default class WorkflowTestWorker extends Cloudflare.Worker<WorkflowTestWo
 
         if (request.url.startsWith("/workflow/start/")) {
           const value = request.url.split("/workflow/start/")[1] ?? "world";
-          const instance = yield* workflow.create({ value });
+          const instance = yield* workflow.create({ params: { value } });
           return yield* HttpServerResponse.json({ instanceId: instance.id });
         }
 
         if (request.url.startsWith("/workflow/wait/")) {
           const value = request.url.split("/workflow/wait/")[1] ?? "world";
-          const instance = yield* workflow.create({ value, wait: true });
+          const instance = yield* workflow.create({
+            params: { value, wait: true },
+          });
           return yield* HttpServerResponse.json({ instanceId: instance.id });
         }
 
@@ -37,23 +39,6 @@ export default class WorkflowTestWorker extends Cloudflare.Worker<WorkflowTestWo
             payload: { message },
           });
           return yield* HttpServerResponse.json({ ok: true });
-        }
-
-        if (request.url.startsWith("/workflow/restart/")) {
-          const instanceId = request.url.split("/workflow/restart/")[1] ?? "";
-          const instance = yield* workflow.get(instanceId);
-          yield* instance.restart({ from: { name: "greet" } });
-          return yield* HttpServerResponse.json({ ok: true });
-        }
-
-        if (request.url.startsWith("/workflow/batch")) {
-          const instances = yield* workflow.createBatch([
-            { id: "batch-one", params: { value: "one" } },
-            { id: "batch-two", params: { value: "two" } },
-          ]);
-          return yield* HttpServerResponse.json({
-            instanceIds: instances.map((instance) => instance.id),
-          });
         }
 
         if (request.url.startsWith("/workflow/status/")) {

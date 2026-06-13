@@ -26,36 +26,54 @@ const WorkflowTypeId: WorkflowTypeId = "Cloudflare.Workflow";
 export class WorkflowEvent extends Context.Service<
   WorkflowEvent,
   {
+    /** Payload passed to `workflow.create({ params })`. */
     payload: unknown;
+    /** Time the workflow instance was created. */
     timestamp: Date;
+    /** Cloudflare workflow instance ID. */
     instanceId: string;
+    /** Workflow binding/class name that is executing. */
     workflowName: string;
+    /** Cron trigger metadata when the instance was scheduled. */
     schedule?: WorkflowCronSchedule;
   }
 >()("Cloudflare.WorkflowEvent") {}
 
 export interface WorkflowCronSchedule {
+  /** Cron expression that triggered the instance. */
   cron: string;
+  /** Scheduled trigger time in milliseconds since the Unix epoch. */
   scheduledTime: number;
 }
 
 export type WorkflowBackoff = "constant" | "linear" | "exponential";
 
+/** Retry and timeout settings for a Cloudflare workflow step. */
 export interface WorkflowStepConfig {
+  /** Retry policy for this step. */
   retries?: {
+    /** Number of retry attempts Cloudflare should run for the step. */
     limit: number;
+    /** Delay between attempts, in milliseconds or a human-readable duration. */
     delay: string | number;
+    /** Backoff algorithm used between attempts. */
     backoff?: WorkflowBackoff;
   };
+  /** Per-attempt timeout, in milliseconds or a human-readable duration. */
   timeout?: string | number;
 }
 
 export interface WorkflowStepContextData {
+  /** Metadata about the current step call. */
   step: {
+    /** Step name passed to `task`. */
     name: string;
+    /** Number of times this step name has been used in the run. */
     count: number;
   };
+  /** Current attempt number, 1 on the first try. */
   attempt: number;
+  /** Resolved Cloudflare step config for this attempt. */
   config: WorkflowStepConfig;
 }
 
@@ -68,19 +86,43 @@ export class WorkflowStepContext extends Context.Service<
 >()("Cloudflare.WorkflowStepContext") {}
 
 export interface WorkflowRollbackContext<Output = unknown> {
+  /** Error that caused the workflow to enter rollback. */
   error: Error;
+  /** Output returned by the forward step, if it completed. */
   output: Output | undefined;
 }
 
+/** Rollback handler passed through to Cloudflare `step.do`. */
 export interface WorkflowRollbackOptions<Output = unknown, R = never> {
+  /** Compensating action to run if a later step fails. */
   rollback: (
     context: WorkflowRollbackContext<Output>,
   ) => Effect.Effect<void, never, R>;
+  /** Retry and timeout settings for the rollback handler. */
   rollbackConfig?: WorkflowStepConfig;
 }
 
+/**
+ * Options for `task(name, effect, options)`, combining step config and
+ * rollback registration in one named object.
+ */
+export interface WorkflowTaskOptions<
+  Output = unknown,
+  R = never,
+> extends WorkflowStepConfig {
+  /** Compensating action to run if a later step fails. */
+  rollback?: (
+    context: WorkflowRollbackContext<Output>,
+  ) => Effect.Effect<void, never, R>;
+  /** Retry and timeout settings for the rollback handler. */
+  rollbackConfig?: WorkflowStepConfig;
+}
+
+/** Options for waiting on an external workflow event. */
 export interface WorkflowWaitForEventOptions {
+  /** Event type to match against `WorkflowInstance.sendEvent({ type })`. */
   type: string;
+  /** Maximum wait duration. Defaults to Cloudflare's workflow timeout. */
   timeout?: string | number;
 }
 
@@ -92,7 +134,8 @@ type ExcludeWorkflowStepContext<R> = R extends {
 
 /**
  * Internal service that wraps the Cloudflare `WorkflowStep` object.
- * Not accessed directly by users -- use `task`, `sleep`, `sleepUntil` instead.
+ * Not accessed directly by users -- use `task`, `sleep`, `sleepUntil`, and
+ * `waitForEvent` instead.
  */
 export class WorkflowStep extends Context.Service<
   WorkflowStep,
@@ -125,20 +168,19 @@ export class WorkflowStep extends Context.Service<
  * binding like `kv.put` / `kv.get`) are threaded through automatically by
  * capturing the surrounding workflow body's context and providing it to
  * the inner effect before it runs inside `step.do`.
+ *
+ * Use the third `options` argument for retries, timeout, and rollback. Keeping
+ * the Effect as the second argument makes the common shape easy to read and
+ * avoids confusing config/effect overloads.
  */
 export function task<T, R = never>(
   name: string,
   effect: Effect.Effect<T, never, R>,
 ): Effect.Effect<T, never, WorkflowStep | ExcludeWorkflowStepContext<R>>;
-export function task<T, R = never>(
-  name: string,
-  config: WorkflowStepConfig,
-  effect: Effect.Effect<T, never, R>,
-): Effect.Effect<T, never, WorkflowStep | ExcludeWorkflowStepContext<R>>;
 export function task<T, R = never, RollbackReq = never>(
   name: string,
   effect: Effect.Effect<T, never, R>,
-  options: WorkflowRollbackOptions<T, RollbackReq>,
+  options: WorkflowTaskOptions<T, RollbackReq>,
 ): Effect.Effect<
   T,
   never,
@@ -146,19 +188,8 @@ export function task<T, R = never, RollbackReq = never>(
 >;
 export function task<T, R = never, RollbackReq = never>(
   name: string,
-  config: WorkflowStepConfig,
   effect: Effect.Effect<T, never, R>,
-  options: WorkflowRollbackOptions<T, RollbackReq>,
-): Effect.Effect<
-  T,
-  never,
-  WorkflowStep | ExcludeWorkflowStepContext<R | RollbackReq>
->;
-export function task<T, R = never, RollbackReq = never>(
-  name: string,
-  arg1: WorkflowStepConfig | Effect.Effect<T, never, R>,
-  arg2?: Effect.Effect<T, never, R> | WorkflowRollbackOptions<T, RollbackReq>,
-  arg3?: WorkflowRollbackOptions<T, RollbackReq>,
+  options?: WorkflowTaskOptions<T, RollbackReq>,
 ): Effect.Effect<
   T,
   never,
@@ -168,17 +199,14 @@ export function task<T, R = never, RollbackReq = never>(
     const step = yield* WorkflowStep;
     const context =
       yield* Effect.context<ExcludeWorkflowStepContext<R | RollbackReq>>();
-    const hasConfig = !Effect.isEffect(arg1 as any);
-    const config = hasConfig ? (arg1 as WorkflowStepConfig) : undefined;
-    const effect = (hasConfig ? arg2 : arg1) as Effect.Effect<T, never, R>;
-    const options = (hasConfig ? arg3 : arg2) as
-      | WorkflowRollbackOptions<T, RollbackReq>
-      | undefined;
-    const rollback = options
+    const config = toWorkflowStepConfig(options);
+    const rollbackEffect = options?.rollback;
+    const rollbackConfig = options?.rollbackConfig;
+    const rollback = rollbackEffect
       ? {
-          ...options,
           rollback: (rollbackContext: WorkflowRollbackContext<T>) =>
-            options.rollback(rollbackContext).pipe(Effect.provide(context)),
+            rollbackEffect(rollbackContext).pipe(Effect.provide(context)),
+          rollbackConfig,
         }
       : undefined;
     return yield* step.do(
@@ -245,7 +273,6 @@ export const waitForEvent = <T = unknown>(
 export type WorkflowRunServices =
   | WorkflowEvent
   | WorkflowStep
-  | WorkflowStepContext
   | WorkerServices
   | ExecutionContext;
 
@@ -293,55 +320,87 @@ export const isWorkflowBinding = (binding: {
  * workflow instances and checking their status from the Api layer.
  */
 export interface WorkflowHandle<Input = unknown, Result = unknown> {
+  /** Resource type marker. */
   Type: WorkflowTypeId;
+  /** Workflow binding/class name. */
   name: string;
-  create(input: Input): Effect.Effect<WorkflowInstance<Result>>;
+  /**
+   * Start a workflow instance. Pass payload through `params`; omit `id` to let
+   * Cloudflare generate an instance ID.
+   */
   create(
     options?: WorkflowInstanceCreateOptions<Input>,
   ): Effect.Effect<WorkflowInstance<Result>>;
+  /** Start up to 100 workflow instances in one idempotent batch. */
   createBatch(
     batch: WorkflowInstanceCreateOptions<Input>[],
   ): Effect.Effect<WorkflowInstance<Result>[]>;
+  /** Get a handle for an existing workflow instance by ID. */
   get(instanceId: string): Effect.Effect<WorkflowInstance<Result>>;
 }
 
+/** Options for starting a workflow instance. */
 export interface WorkflowInstanceCreateOptions<Input = unknown> {
+  /** Optional deterministic instance ID. Omit to let Cloudflare generate one. */
   id?: string;
+  /** Input payload received by the workflow body. */
   params?: Input;
+  /** How long Cloudflare should retain instance state after completion. */
   retention?: WorkflowInstanceRetention;
 }
 
+/** Retention policy for completed workflow instance state. */
 export interface WorkflowInstanceRetention {
+  /** How long to retain state after successful completion. */
   successRetention?: string | number;
+  /** How long to retain state after error or termination. */
   errorRetention?: string | number;
 }
 
+/** Handle for a single Cloudflare workflow instance. */
 export interface WorkflowInstance<Result = unknown> {
+  /** Cloudflare workflow instance ID. */
   id: string;
+  /** Read the current instance status and output. */
   status(): Effect.Effect<WorkflowInstanceStatus<Result>>;
+  /** Pause a running or queued instance. */
   pause(): Effect.Effect<void>;
+  /** Resume a paused instance. */
   resume(): Effect.Effect<void>;
+  /** Restart an instance, optionally from a named step. */
   restart(options?: WorkflowInstanceRestartOptions): Effect.Effect<void>;
+  /** Terminate the instance. */
   terminate(): Effect.Effect<void>;
+  /** Send an external event to a running `waitForEvent` step. */
   sendEvent<Event = unknown>(
     event: WorkflowInstanceEvent<Event>,
   ): Effect.Effect<void>;
 }
 
+/** Options for restarting a workflow instance from a specific step. */
 export interface WorkflowInstanceRestartOptions {
+  /** Step location to restart from. Omit to restart from the beginning. */
   from?: {
+    /** Step name passed to `task`, `sleep`, or `waitForEvent`. */
     name: string;
+    /** Step occurrence count when the same name is used multiple times. */
     count?: number;
+    /** Step type to disambiguate names shared by different primitives. */
     type?: "do" | "sleep" | "waitForEvent";
   };
 }
 
+/** Event sent to a waiting workflow instance. */
 export interface WorkflowInstanceEvent<Payload = unknown> {
+  /** Event type matched by `waitForEvent({ type })`. */
   type: string;
+  /** Optional event payload returned from `waitForEvent`. */
   payload?: Payload;
 }
 
+/** Current status of a workflow instance. */
 export interface WorkflowInstanceStatus<Result = unknown> {
+  /** Cloudflare workflow lifecycle state. */
   status:
     | "queued"
     | "running"
@@ -353,8 +412,11 @@ export interface WorkflowInstanceStatus<Result = unknown> {
     | "waitingForPause"
     | "unknown"
     | (string & {});
+  /** Workflow return value when the instance completes. */
   output?: Result;
+  /** Failure details when the instance errors. */
   error?: { name: string; message: string } | null;
+  /** Rollback outcome after a failure, when rollback handlers were registered. */
   rollback?: {
     outcome: "complete" | "failed";
     error: { name: string; message: string } | null;
@@ -401,7 +463,8 @@ export class WorkflowScope extends Context.Service<
  * Objects. The outer `Effect.gen` resolves shared dependencies. The inner
  * `Effect.fn` is the workflow body — a function from a typed `input`
  * payload to an Effect that runs steps using `task`, `sleep`, and
- * `sleepUntil`.
+ * `sleepUntil`. `task` keeps the Effect as the second argument; retries,
+ * timeouts, and rollbacks are named options in the third argument.
  *
  * ```typescript
  * Effect.gen(function* () {
@@ -445,11 +508,11 @@ export class WorkflowScope extends Context.Service<
  * ```typescript
  * const result = yield* Cloudflare.task(
  *   "call-api",
- *   { retries: { limit: 3, delay: "5 seconds", backoff: "linear" } },
  *   Effect.gen(function* () {
  *     const context = yield* Cloudflare.WorkflowStepContext;
  *     return { attempt: context.attempt };
  *   }),
+ *   { retries: { limit: 3, delay: "5 seconds", backoff: "linear" } },
  * );
  * ```
  *
@@ -508,13 +571,17 @@ export class WorkflowScope extends Context.Service<
  * ```
  *
  * @section Starting and Monitoring Instances
+ * `create` mirrors Cloudflare's native Workflow API: pass workflow input in
+ * `params`, pass `id` only when you need a deterministic instance ID, and omit
+ * `id` to let Cloudflare generate one.
+ *
  * @example Creating an instance from a Worker
  * ```typescript
  * const workflow = yield* MyWorkflow;
- * const instance = yield* workflow.create({ orderId: "abc" });
+ * const instance = yield* workflow.create({ params: { orderId: "abc" } });
  * ```
  *
- * @example Creating an instance with options
+ * @example Creating an instance with id and retention
  * ```typescript
  * const instance = yield* workflow.create({
  *   id: "order-abc",
@@ -560,7 +627,7 @@ export class WorkflowScope extends Context.Service<
  *
  *     if (request.url.startsWith("/workflow/start/")) {
  *       const id = request.url.split("/").pop()!;
- *       const instance = yield* notifier.create({ id });
+ *       const instance = yield* notifier.create({ params: { orderId: id } });
  *       return HttpServerResponse.json({ instanceId: instance.id });
  *     }
  *
@@ -576,9 +643,8 @@ export class WorkflowScope extends Context.Service<
  * ```
  *
  * @section Testing Workflows
- * Workflows run asynchronously, so tests start an instance and
- * poll until it reaches a terminal status. A simple recipe with
- * `alchemy/Test/Bun`:
+ * Workflows run asynchronously, so tests start an instance and poll until it
+ * reaches a terminal status. Keep polling bounded with `Effect.repeat`.
  *
  * @example Polling for workflow completion
  * ```typescript
@@ -590,20 +656,20 @@ export class WorkflowScope extends Context.Service<
  *     const start = yield* HttpClient.post(`${url}/workflow/start/x`);
  *     const { instanceId } = (yield* start.json) as { instanceId: string };
  *
- *     let status: { status: string } | undefined;
- *     const deadline = Date.now() + 60_000;
- *     while (Date.now() < deadline) {
- *       const res = yield* HttpClient.get(
- *         `${url}/workflow/status/${instanceId}`,
- *       );
- *       status = (yield* res.json) as { status: string };
- *       if (status.status === "complete" || status.status === "errored") {
- *         break;
- *       }
- *       yield* Effect.sleep("2 seconds");
- *     }
+ *     const status = yield* HttpClient.get(
+ *       `${url}/workflow/status/${instanceId}`,
+ *     ).pipe(
+ *       Effect.flatMap((res) => res.json),
+ *       Effect.map((json) => json as { status: string }),
+ *       Effect.repeat({
+ *         schedule: Schedule.spaced("2 seconds"),
+ *         until: (status) =>
+ *           status.status === "complete" || status.status === "errored",
+ *         times: 30,
+ *       }),
+ *     );
  *
- *     expect(status?.status).toBe("complete");
+ *     expect(status.status).toBe("complete");
  *   }),
  *   { timeout: 120_000 },
  * );
@@ -662,10 +728,11 @@ export const Workflow: WorkflowClass = taggedFunction(WorkflowScope, ((
           const self: WorkflowHandle<any, any> = {
             Type: WorkflowTypeId,
             name,
-            create: (input?: unknown) =>
-              Effect.tryPromise(() =>
-                binding.create(toCreateOptions(input)),
-              ).pipe(Effect.map(wrapInstance), Effect.orDie),
+            create: (options?: WorkflowInstanceCreateOptions<any>) =>
+              Effect.tryPromise(() => binding.create(options)).pipe(
+                Effect.map(wrapInstance),
+                Effect.orDie,
+              ),
             createBatch: (batch: WorkflowInstanceCreateOptions<any>[]) =>
               Effect.tryPromise(
                 () => binding.createBatch(batch) as Promise<any[]>,
@@ -820,17 +887,9 @@ const wrapInstance = <Result>(raw: any): WorkflowInstance<Result> => ({
     Effect.tryPromise(() => raw.sendEvent(event)).pipe(Effect.orDie),
 });
 
-const toCreateOptions = <Input>(
-  input?: Input | WorkflowInstanceCreateOptions<Input>,
-): WorkflowInstanceCreateOptions<Input> | undefined => {
-  if (input === undefined) return undefined;
-  if (isCreateOptions(input)) return input;
-  return { params: input };
+const toWorkflowStepConfig = (
+  options: WorkflowTaskOptions | undefined,
+): WorkflowStepConfig | undefined => {
+  if (!options?.retries && !options?.timeout) return undefined;
+  return { retries: options.retries, timeout: options.timeout };
 };
-
-const isCreateOptions = <Input>(
-  value: Input | WorkflowInstanceCreateOptions<Input>,
-): value is WorkflowInstanceCreateOptions<Input> =>
-  typeof value === "object" &&
-  value !== null &&
-  ("params" in value || "retention" in value || "id" in value);

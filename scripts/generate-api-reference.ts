@@ -236,6 +236,8 @@ function findPrimaryJSDoc(sourceFile: SourceFile): ParsedJSDoc {
     }
   }
 
+  let firstWithSummary: ParsedJSDoc | undefined;
+
   for (const cls of sourceFile.getClasses()) {
     if (!cls.isExported()) continue;
     const jsdoc = parseJSDoc(cls);
@@ -245,10 +247,9 @@ function findPrimaryJSDoc(sourceFile: SourceFile): ParsedJSDoc {
       jsdoc.sections.length > 0
     )
       return jsdoc;
-    if (jsdoc.summary) return jsdoc;
+    if (!firstWithSummary && jsdoc.summary) firstWithSummary = jsdoc;
   }
 
-  let firstWithSummary: ParsedJSDoc | undefined;
   for (const stmt of sourceFile.getStatements()) {
     if (Node.isExportable(stmt) && stmt.isExported()) {
       const jsdoc = parseJSDoc(stmt);

@@ -77,13 +77,6 @@ export const makeWorkflowBridge =
                 wrapWorkflowEvent(event),
               ).pipe(
                 Layer.provideMerge(
-                  Layer.succeed(WorkflowStepContext, {
-                    step: { name: "workflow", count: 0 },
-                    attempt: 1,
-                    config: {},
-                  }),
-                ),
-                Layer.provideMerge(
                   Layer.succeed(WorkflowStep, wrapWorkflowStep(step)),
                 ),
                 Layer.provideMerge(
