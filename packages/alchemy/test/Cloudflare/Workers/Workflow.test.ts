@@ -27,9 +27,39 @@ afterAll.skipIf(!!process.env.NO_DESTROY)(destroy(Stack));
 
 interface WorkflowStatus {
   status: string;
-  output?: { greeting: string; envBindingCount: number };
+  output?: {
+    greeting: string;
+    envBindingCount: number;
+    workflowName: string;
+    stepAttempt: number;
+    instanceId: string;
+  };
   error?: { message?: string } | null;
+  rollback?: {
+    outcome: "complete" | "failed";
+    error: { message?: string } | null;
+  } | null;
 }
+
+const isTerminal = (status: WorkflowStatus) =>
+  status.status === "complete" ||
+  status.status === "errored" ||
+  status.status === "terminated";
+
+const waitForStatus = (
+  client: HttpClient.HttpClient,
+  url: string,
+  id: string,
+) =>
+  client.get(`${url}/workflow/status/${id}`).pipe(
+    Effect.flatMap((res) => res.json),
+    Effect.map((json) => json as unknown as WorkflowStatus),
+    Effect.repeat({
+      schedule: Schedule.spaced("2 seconds"),
+      until: isTerminal,
+      times: 30,
+    }),
+  );
 
 // Start a fresh workflow instance and poll until it reaches a terminal state.
 // A transient `errored` during edge/binding propagation fails this effect so
@@ -56,17 +86,7 @@ const runWorkflowToCompletion = (url: string) =>
     const { instanceId } = (yield* startRes.json) as { instanceId: string };
     expect(instanceId).toBeTypeOf("string");
 
-    const lastStatus = yield* client
-      .get(`${url}/workflow/status/${instanceId}`)
-      .pipe(
-        Effect.flatMap((res) => res.json),
-        Effect.map((json) => json as unknown as WorkflowStatus),
-        Effect.repeat({
-          schedule: Schedule.spaced("2 seconds"),
-          until: (s) => s.status === "complete" || s.status === "errored",
-          times: 12,
-        }),
-      );
+    const lastStatus = yield* waitForStatus(client, url, instanceId);
 
     // Surface a non-complete terminal state as a failure so the outer retry
     // can take another swing (a fresh worker occasionally errors a step while
@@ -95,9 +115,45 @@ test(
     expect(lastStatus.status).toBe("complete");
     expect(lastStatus.error).toBeFalsy();
     expect(lastStatus.output?.greeting).toBe("Hello, world!");
+    expect(lastStatus.output?.workflowName).toBe("TestWorkflow");
+    expect(lastStatus.output?.stepAttempt).toBe(1);
+    expect(lastStatus.rollback).toBeNull();
     // The body yields `WorkerEnvironment` — if the regression from PR #71 ever
     // returns, the body dies on the first yield and `output` is undefined.
     expect(lastStatus.output?.envBindingCount).toBeGreaterThan(0);
   }).pipe(logLevel),
-  { timeout: 30_000 },
+  { timeout: 180_000 },
+);
+
+test(
+  "workflow can wait for and receive external events",
+  Effect.gen(function* () {
+    const { url } = yield* stack;
+    const client = yield* HttpClient.HttpClient;
+
+    const startRes = yield* client.post(`${url}/workflow/wait/world`).pipe(
+      Effect.flatMap((res) =>
+        res.status === 200
+          ? Effect.succeed(res)
+          : Effect.fail(new Error(`Worker not ready: ${res.status}`)),
+      ),
+      Effect.retry({
+        schedule: Schedule.exponential("500 millis"),
+        times: 15,
+      }),
+    );
+    const { instanceId } = (yield* startRes.json) as { instanceId: string };
+
+    const sendRes = yield* client.post(
+      `${url}/workflow/send/${instanceId}/external-ok`,
+    );
+    expect(sendRes.status).toBe(200);
+
+    const lastStatus = yield* waitForStatus(client, url, instanceId);
+    expect(lastStatus.status).toBe("complete");
+    expect(lastStatus.error).toBeFalsy();
+    expect(lastStatus.output?.greeting).toBe("external-ok");
+    expect(lastStatus.output?.instanceId).toBe(instanceId);
+  }).pipe(logLevel),
+  { timeout: 180_000 },
 );
