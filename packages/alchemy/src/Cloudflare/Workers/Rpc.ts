@@ -587,6 +587,11 @@ export const makeWorkflowBridge =
               WorkflowEventService,
               wrapWorkflowEvent(event),
             ),
+            Effect.provideService(WorkflowStepContext, {
+              step: { name: "workflow", count: 0 },
+              attempt: 1,
+              config: {},
+            }),
             Effect.provideService(WorkflowStep, wrapWorkflowStep(step)),
           ) as Effect.Effect<unknown>,
         );
@@ -597,24 +602,58 @@ import type { DurableObjectShape } from "./DurableObjectNamespace.ts";
 import {
   WorkflowEvent as WorkflowEventService,
   WorkflowStep,
+  WorkflowStepContext,
+  type WorkflowRollbackOptions,
+  type WorkflowStepConfig,
 } from "./Workflow.ts";
 
-const wrapWorkflowEvent = (
-  event: any,
-): { payload: unknown; timestamp: Date; instanceId: string } => ({
+const wrapWorkflowEvent = (event: any): WorkflowEventService["Service"] => ({
   payload: event.payload,
   timestamp:
     event.timestamp instanceof Date
       ? event.timestamp
       : new Date(event.timestamp),
   instanceId: event.instanceId ?? "",
+  workflowName: event.workflowName ?? "",
+  schedule: event.schedule,
 });
 
 const wrapWorkflowStep = (step: any): WorkflowStep["Service"] => ({
-  do: <T>(name: string, effect: Effect.Effect<T>): Effect.Effect<T> =>
-    Effect.tryPromise(
-      () => step.do(name, () => Effect.runPromise(effect)) as Promise<T>,
-    ),
+  do: <T>(
+    name: string,
+    effect: Effect.Effect<T>,
+    config?: WorkflowStepConfig,
+    options?: WorkflowRollbackOptions<T>,
+  ): Effect.Effect<T> => {
+    const callback = (context: any) =>
+      Effect.runPromise(
+        effect.pipe(
+          Effect.provideService(WorkflowStepContext, {
+            step: context.step,
+            attempt: context.attempt,
+            config: context.config,
+          }),
+        ),
+      );
+    const rollback = options
+      ? {
+          rollback: (context: any) =>
+            Effect.runPromise(
+              options.rollback({
+                error: context.error,
+                output: context.output,
+              }),
+            ),
+          rollbackConfig: options.rollbackConfig,
+        }
+      : undefined;
+    return Effect.tryPromise(() => {
+      if (config && rollback) return step.do(name, config, callback, rollback);
+      if (config) return step.do(name, config, callback);
+      if (rollback) return step.do(name, callback, rollback);
+      return step.do(name, callback);
+    });
+  },
   sleep: (name: string, duration: string | number): Effect.Effect<void> =>
     Effect.tryPromise(() => step.sleep(name, duration)),
   sleepUntil: (name: string, timestamp: Date | number): Effect.Effect<void> =>
@@ -624,6 +663,8 @@ const wrapWorkflowStep = (step: any): WorkflowStep["Service"] => ({
         timestamp instanceof Date ? timestamp.toISOString() : timestamp,
       ),
     ),
+  waitForEvent: <T>(name: string, options: any): Effect.Effect<T> =>
+    Effect.tryPromise(() => step.waitForEvent(name, options) as Promise<T>),
 });
 
 const encodeStreamErrorMarker = (cause: Cause.Cause<unknown>): string => {

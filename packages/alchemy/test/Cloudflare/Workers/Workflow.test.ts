@@ -34,6 +34,42 @@ const Stack = Alchemy.Stack(
 const stack = beforeAll(deploy(Stack));
 afterAll.skipIf(!!process.env.NO_DESTROY)(destroy(Stack));
 
+type WorkflowStatus = {
+  status: string;
+  output?: {
+    greeting: string;
+    envBindingCount: number;
+    workflowName: string;
+    stepAttempt: number;
+    instanceId: string;
+  };
+  error?: { message?: string } | null;
+  rollback?: {
+    outcome: "complete" | "failed";
+    error: { message?: string } | null;
+  } | null;
+};
+
+const isTerminal = (status: WorkflowStatus) =>
+  status.status === "complete" ||
+  status.status === "errored" ||
+  status.status === "terminated";
+
+const waitForStatus = (
+  client: HttpClient.HttpClient,
+  url: string,
+  id: string,
+) =>
+  client.get(`${url}/workflow/status/${id}`).pipe(
+    Effect.flatMap((res) => res.json as Effect.Effect<unknown>),
+    Effect.map((status) => status as WorkflowStatus),
+    Effect.repeat({
+      schedule: Schedule.spaced("2 seconds"),
+      until: isTerminal,
+      times: 30,
+    }),
+  );
+
 test(
   "deployed worker can run a workflow to completion",
   Effect.gen(function* () {
@@ -62,36 +98,52 @@ test(
     const { instanceId } = (yield* startRes.json) as { instanceId: string };
     expect(instanceId).toBeTypeOf("string");
 
-    // Poll the workflow status until it reaches a terminal state.
-    let lastStatus:
-      | {
-          status: string;
-          output?: { greeting: string; envBindingCount: number };
-          error?: { message?: string } | null;
-        }
-      | undefined;
-    const deadline = Date.now() + 60_000;
-    while (Date.now() < deadline) {
-      const statusRes = yield* client.get(
-        `${url}/workflow/status/${instanceId}`,
-      );
-      lastStatus = (yield* statusRes.json) as typeof lastStatus;
-      if (
-        lastStatus?.status === "complete" ||
-        lastStatus?.status === "errored"
-      ) {
-        break;
-      }
-      yield* Effect.sleep("2 seconds");
-    }
+    const lastStatus = yield* waitForStatus(client, url, instanceId);
 
     expect(lastStatus).toBeDefined();
-    expect(lastStatus!.status).toBe("complete");
-    expect(lastStatus!.error).toBeFalsy();
-    expect(lastStatus!.output?.greeting).toBe("Hello, world!");
+    expect(lastStatus.status).toBe("complete");
+    expect(lastStatus.error).toBeFalsy();
+    expect(lastStatus.output?.greeting).toBe("Hello, world!");
+    expect(lastStatus.output?.workflowName).toBe("TestWorkflow");
+    expect(lastStatus.output?.stepAttempt).toBe(1);
+    expect(lastStatus.output?.instanceId).toBe(instanceId);
+    expect(lastStatus.rollback).toBeNull();
     // The body yields `WorkerEnvironment` — if the regression from PR #71 ever
     // returns, the body dies on the first yield and `output` is undefined.
-    expect(lastStatus!.output?.envBindingCount).toBeGreaterThan(0);
+    expect(lastStatus.output?.envBindingCount).toBeGreaterThan(0);
+  }).pipe(logLevel),
+  { timeout: 180_000 },
+);
+
+test(
+  "workflow can wait for and receive external events",
+  Effect.gen(function* () {
+    const { url } = yield* stack;
+    const client = yield* HttpClient.HttpClient;
+
+    const startRes = yield* client.post(`${url}/workflow/wait/world`).pipe(
+      Effect.flatMap((res) =>
+        res.status === 200
+          ? Effect.succeed(res)
+          : Effect.fail(new Error(`Worker not ready: ${res.status}`)),
+      ),
+      Effect.retry({
+        schedule: Schedule.exponential("500 millis"),
+        times: 15,
+      }),
+    );
+    const { instanceId } = (yield* startRes.json) as { instanceId: string };
+
+    const sendRes = yield* client.post(
+      `${url}/workflow/send/${instanceId}/external-ok`,
+    );
+    expect(sendRes.status).toBe(200);
+
+    const lastStatus = yield* waitForStatus(client, url, instanceId);
+    expect(lastStatus.status).toBe("complete");
+    expect(lastStatus.error).toBeFalsy();
+    expect(lastStatus.output?.greeting).toBe("external-ok");
+    expect(lastStatus.output?.instanceId).toBe(instanceId);
   }).pipe(logLevel),
   { timeout: 180_000 },
 );
