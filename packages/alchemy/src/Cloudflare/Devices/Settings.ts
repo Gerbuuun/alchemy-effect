@@ -140,7 +140,18 @@ export const isDeviceSettings = (value: unknown): value is DeviceSettings =>
 
 export const DeviceSettingsProvider = () =>
   Provider.succeed(DeviceSettings, {
+    nuke: { singleton: true },
     stables: ["accountId", "initialSettings"],
+
+    // Account singleton: there is exactly one device-settings object per
+    // account and no enumeration API. Mirror `read` — observe the single
+    // singleton and return it as a one-element array. With no prior
+    // output, the observed snapshot is itself the restore target.
+    list: Effect.fn(function* () {
+      const { accountId } = yield* yield* CloudflareEnvironment;
+      const observed = yield* observeSettings(accountId);
+      return [toAttributes(accountId, observed, observed)];
+    }),
 
     read: Effect.fn(function* ({ output }) {
       const { accountId } = yield* yield* CloudflareEnvironment;

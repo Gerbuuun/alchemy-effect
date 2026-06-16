@@ -180,6 +180,38 @@ export const AccountMemberProvider = () =>
   Provider.succeed(AccountMember, {
     stables: ["memberId", "accountId", "email", "userId"],
 
+    list: Effect.fn(function* () {
+      const { accountId } = yield* yield* CloudflareEnvironment;
+      // Exhaustively paginate the account membership list to collect every
+      // member id, then re-read each membership through `getMember` so each
+      // element matches the EXACT shape `read`/`reconcile` produce. A
+      // membership that vanishes between the list and the per-item read
+      // (typed `MemberNotFound`, Cloudflare code 1003) is dropped.
+      const ids = yield* accounts.listMembers.pages({ accountId }).pipe(
+        Stream.runCollect,
+        Effect.map((chunk) =>
+          Array.from(chunk).flatMap((page) =>
+            (page.result ?? [])
+              .map((member) => member.id)
+              .filter((id): id is string => id != null),
+          ),
+        ),
+      );
+      const rows = yield* Effect.forEach(
+        ids,
+        (memberId) =>
+          getMember(accountId, memberId).pipe(
+            Effect.map((member) =>
+              member ? toAttributes(member, accountId) : undefined,
+            ),
+          ),
+        { concurrency: 10 },
+      );
+      return rows.filter(
+        (row): row is AccountMemberAttributes => row !== undefined,
+      );
+    }),
+
     diff: Effect.fn(function* ({ olds = {}, news }) {
       const o = olds as Partial<AccountMemberProps>;
       const n = news as AccountMemberProps;
@@ -239,9 +271,12 @@ export const AccountMemberProvider = () =>
         observed = yield* findByEmail(accountId, news.email);
       }
 
-      // 3. Ensure — invite when missing. A concurrent invite surfaces as
-      //    a validation error on the duplicate email: converge by
-      //    re-scanning for the membership that won the race.
+      // 3. Ensure — invite when missing. A concurrent (or orphaned) invite
+      //    for the same email surfaces either as a generic validation error
+      //    or as the typed `AccountMemberAlreadyExists` (Cloudflare answers
+      //    the duplicate with HTTP 400 "Account member already exists for
+      //    email address"): in both cases converge by re-scanning for the
+      //    membership that won the race and adopting it.
       if (!observed) {
         const created = yield* accounts
           .createMember({
@@ -252,12 +287,14 @@ export const AccountMemberProvider = () =>
             status: news.status,
           })
           .pipe(
-            Effect.catchTag("ValidationError", (error) =>
-              findByEmail(accountId, news.email).pipe(
-                Effect.flatMap((existing) =>
-                  existing ? Effect.succeed(existing) : Effect.fail(error),
+            Effect.catchTag(
+              ["ValidationError", "AccountMemberAlreadyExists"],
+              (error) =>
+                findByEmail(accountId, news.email).pipe(
+                  Effect.flatMap((existing) =>
+                    existing ? Effect.succeed(existing) : Effect.fail(error),
+                  ),
                 ),
-              ),
             ),
           );
         observed = created;

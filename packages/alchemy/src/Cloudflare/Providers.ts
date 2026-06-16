@@ -20,6 +20,7 @@ import * as AccessCert from "./Access/Certificate.ts";
 import * as AccessCustomPage from "./Access/CustomPage.ts";
 import * as AccessGroup from "./Access/Group.ts";
 import * as AccessIdp from "./Access/IdentityProvider.ts";
+import * as AccessInfraTarget from "./Access/InfrastructureTarget.ts";
 import * as AccessKeyConfig from "./Access/KeyConfiguration.ts";
 import * as AccessMcpPortal from "./Access/McpPortal.ts";
 import * as AccessOrg from "./Access/Organization.ts";
@@ -159,6 +160,7 @@ export const providers = () =>
       AccessCustomPage.AccessCustomPage,
       AccessGroup.AccessGroup,
       AccessIdp.AccessIdentityProvider,
+      AccessInfraTarget.AccessInfrastructureTarget,
       AccessKeyConfig.AccessKeyConfiguration,
       AccessMcpPortal.AccessMcpPortal,
       AccessOrg.AccessOrganization,
@@ -411,6 +413,7 @@ export const providers = () =>
       Workers.BindWorkerPolicy,
       Workers.CronEventSourcePolicy,
       Workers.FetchPolicy,
+      Workers.GitHubRepositoryEventSourcePolicy,
       Workers.ObservabilityDestination,
       Workers.VersionMetadataBindingPolicy,
       Workers.Worker,
@@ -484,6 +487,7 @@ export const providers = () =>
         Workers.BindWorkerPolicyLive,
         Workers.CronEventSourcePolicyLive,
         Workers.FetchPolicyLive,
+        Workers.GitHubRepositoryEventSourcePolicyLive,
         Workers.VersionMetadataBindingPolicyLive,
         Workers.WorkerProvider(),
         Workflows.WorkflowProvider(),
@@ -499,6 +503,7 @@ export const providers = () =>
           AccessCustomPage.AccessCustomPageProvider(),
           AccessGroup.AccessGroupProvider(),
           AccessIdp.AccessIdentityProviderProvider(),
+          AccessInfraTarget.AccessInfrastructureTargetProvider(),
           AccessKeyConfig.AccessKeyConfigurationProvider(),
           AccessMcpPortal.AccessMcpPortalProvider(),
           AccessOrg.AccessOrganizationProvider(),
@@ -840,5 +845,14 @@ const isMisleadinglyTaggedTransient = (error: unknown): boolean => {
   // messages are unambiguously distinct, so we can safely retry only
   // the internal-error variant.
   if (tag === "Forbidden" && /internal error/i.test(message)) return true;
+  // CF code 10001: "Unable to authenticate request" intermittently 403s
+  // otherwise-valid, long-lived credentials during Cloudflare-side auth/edge
+  // blips — it is transient, not a real credential problem (a genuinely
+  // invalid/expired token surfaces as `Unauthorized: Authentication error`,
+  // code 10000). The retry is bounded (see `cloudflareRetryFactory`), so even
+  // a persistent auth failure that somehow used this message would just fail
+  // fast after backoff rather than loop forever.
+  if (tag === "Forbidden" && /unable to authenticate request/i.test(message))
+    return true;
   return false;
 };

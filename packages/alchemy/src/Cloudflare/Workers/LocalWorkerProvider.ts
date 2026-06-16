@@ -63,7 +63,6 @@ import { CloudflareEnvironment } from "../CloudflareEnvironment.ts";
 import { LOCAL_ENTRY_URL, LocalRuntimeState } from "../LocalRuntime.ts";
 import type { WorkerAssetsConfig, WorkerProps } from "../Workers/Worker.ts";
 import { getCompatibility } from "./Compatibility.ts";
-import * as Vite from "./Vite.ts";
 import { Worker } from "./Worker.ts";
 import { getCronBindings } from "./WorkerAsyncBindings.ts";
 import type { WorkerBinding } from "./WorkerBinding.ts";
@@ -385,6 +384,9 @@ export const LocalWorkerProvider = () =>
       ) {
         const proxy = yield* maybeStartProxy(worker.id, worker.dev);
         yield* proxy.unset().pipe(Effect.forkChild);
+        // Loaded lazily: `./Vite.ts` pulls in `@distilled.cloud/cloudflare-vite-plugin`
+        // (~0.5s); only needed when running a vite dev server.
+        const Vite = yield* Effect.promise(() => import("./Vite.ts"));
         const devServer = yield* Vite.viteDev(
           rootDir,
           worker.env ?? {},
@@ -452,6 +454,16 @@ export const LocalWorkerProvider = () =>
       });
 
       return {
+        // Local dev provider: there is no cloud enumeration API. The set of
+        // locally running Workers is the in-memory `instances` map; each
+        // instance's fiber resolves to the Worker Attributes once it has
+        // started, so enumerate that local state.
+        list: () =>
+          Effect.forEach(
+            Array.from(instances.values()),
+            (instance) => Fiber.join(instance.fiber),
+            { concurrency: "unbounded" },
+          ),
         diff: Effect.fn(function* ({ id, news, newBindings, output }) {
           if (!isResolved(news) || !isResolved(newBindings)) return undefined;
           const options = {

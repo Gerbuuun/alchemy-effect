@@ -190,6 +190,7 @@ export const AccessOrganization = Resource<AccessOrganization>(
 
 export const AccessOrganizationProvider = () =>
   Provider.succeed(AccessOrganization, {
+    nuke: { singleton: true },
     stables: ["accountId", "authDomain"],
     reconcile: Effect.fn(function* ({ news }) {
       const { accountId } = yield* yield* CloudflareEnvironment;
@@ -315,6 +316,25 @@ export const AccessOrganizationProvider = () =>
         olds?.authDomain ?? observed.authDomain ?? "",
         olds?.name ?? observed.name ?? olds?.authDomain ?? "",
       );
+    }),
+    // Account singleton: every Cloudflare account owns exactly one Access
+    // Organization and there is no enumeration API. Read the single org via
+    // the same `observe` path `read` uses and return the one-element array
+    // (or `[]` when the account has never enabled Zero Trust). `observe`
+    // already swallows the typed `OrganizationNotFound` error.
+    list: Effect.fn(function* () {
+      const { accountId } = yield* yield* CloudflareEnvironment;
+
+      const observed = yield* observe();
+      if (!observed) return [];
+      return [
+        toAttrs(
+          accountId,
+          observed,
+          observed.authDomain ?? "",
+          observed.name ?? observed.authDomain ?? "",
+        ),
+      ];
     }),
   });
 

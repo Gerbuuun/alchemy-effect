@@ -106,6 +106,7 @@ export const isWorkersAccountSetting = (
 
 export const WorkersAccountSettingProvider = () =>
   Provider.succeed(WorkersAccountSetting, {
+    nuke: { singleton: true },
     stables: ["accountId", "initialDefaultUsageModel", "initialGreenCompute"],
 
     diff: Effect.fn(function* ({ output }) {
@@ -135,6 +136,23 @@ export const WorkersAccountSettingProvider = () =>
           ? output.initialGreenCompute
           : (observed.greenCompute ?? undefined),
       );
+    }),
+
+    // Account-scoped singleton: there is no collection API — the settings
+    // object always exists once per account. Read the single live object and
+    // return it as a one-element array, exactly mirroring `read` (a cold
+    // observation where the observed values are the initial values).
+    list: Effect.fn(function* () {
+      const { accountId } = yield* yield* CloudflareEnvironment;
+      const observed = yield* workers.getAccountSetting({ accountId });
+      return [
+        toAttributes(
+          accountId,
+          observed,
+          observed.defaultUsageModel ?? undefined,
+          observed.greenCompute ?? undefined,
+        ),
+      ];
     }),
 
     reconcile: Effect.fn(function* ({ news, output }) {

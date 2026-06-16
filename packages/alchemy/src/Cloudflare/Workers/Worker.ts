@@ -10,6 +10,7 @@ import * as Path from "effect/Path";
 import * as Predicate from "effect/Predicate";
 import * as Redacted from "effect/Redacted";
 import * as Schedule from "effect/Schedule";
+import * as Stream from "effect/Stream";
 import * as crypto from "node:crypto";
 import { Unowned } from "../../AdoptPolicy.ts";
 import * as Artifacts from "../../Artifacts.ts";
@@ -40,7 +41,6 @@ import {
 } from "./DurableObjectNamespace.ts";
 import { LocalWorkerProvider } from "./LocalWorkerProvider.ts";
 import { Request } from "./Request.ts";
-import * as Vite from "./Vite.ts";
 import {
   bindWorkerAsyncBindings,
   getCronBindings,
@@ -1232,6 +1232,10 @@ export const LiveWorkerProvider = () =>
 
       const viteBuild = Effect.fnUntraced(function* (props: WorkerProps) {
         const compatibility = getCompatibility(props);
+        // Loaded lazily: `./Vite.ts` pulls in `@distilled.cloud/cloudflare-vite-plugin`
+        // (~0.5s), which is only needed for vite-based workers at build time —
+        // not for every Worker definition at module-load time.
+        const Vite = yield* Effect.promise(() => import("./Vite.ts"));
         const { assetsDirectory, serverBundle } = yield* Vite.viteBuild(
           props.vite?.rootDir,
           Object.fromEntries(
@@ -1874,6 +1878,56 @@ export const LiveWorkerProvider = () =>
 
       return Worker.Provider.of({
         stables: ["workerId", "workerName"],
+        list: () =>
+          Effect.gen(function* () {
+            const { accountId } = yield* yield* CloudflareEnvironment;
+            // Account-scoped enumeration of every Worker script. The
+            // per-script `read` makes several extra calls (subdomain,
+            // settings, domains, schedule) to fully hydrate
+            // url/durableObjectNamespaces/domains/crons. Doing that for
+            // every script on the account is both expensive (4 calls × N)
+            // and fragile — a single script with a binding shape the
+            // settings schema doesn't know about would break the whole
+            // listing (the same reason `read` deliberately avoids
+            // `listScripts`). For `list()` we hydrate the core identifying
+            // and settings fields that come straight from the script
+            // metadata and leave the binding-derived fields at the same
+            // defaults `read` returns when those sub-resources are absent
+            // (`url: undefined`, `durableObjectNamespaces: {}`,
+            // `domains: []`, `crons: []`). `accountId` + `workerName` are
+            // sufficient for `delete`.
+            return yield* workers.listScripts.pages({ accountId }).pipe(
+              Stream.runCollect,
+              Effect.map((chunk) =>
+                Array.from(chunk).flatMap((page) =>
+                  // Annotate the element type as the full `Attributes` shape
+                  // (incl. the optional `hash`) so it matches `read` exactly.
+                  // `list()` is an inference source for the provider's resource
+                  // type; a narrower element (e.g. via `satisfies`, which omits
+                  // `hash`) would derail `Res` inference and cascade every
+                  // lifecycle method's requirement channel to `never`.
+                  (page.result ?? []).flatMap(
+                    (script): Worker["Attributes"][] =>
+                      script.id
+                        ? [
+                            {
+                              accountId,
+                              workerId: script.id,
+                              workerName: script.id,
+                              logpush: script.logpush ?? undefined,
+                              url: undefined,
+                              tags: script.tags ?? undefined,
+                              durableObjectNamespaces: {},
+                              domains: [],
+                              crons: [],
+                            },
+                          ]
+                        : [],
+                  ),
+                ),
+              ),
+            );
+          }),
         diff: Effect.fnUntraced(function* ({
           id,
           news,
@@ -1917,15 +1971,73 @@ export const LiveWorkerProvider = () =>
           const cronsChanged =
             newCrons.length !== oldCrons.length ||
             newCrons.some((cron, index) => cron !== oldCrons[index]);
+          // `url` is `domains[0]`: the first custom domain in user order if
+          // any, otherwise the workers.dev URL (derived from the stable
+          // worker name + account subdomain). It's stable across this update
+          // exactly when that first domain is unchanged — which is NOT the
+          // same as "the domain set is unchanged": adding a second custom
+          // domain leaves `url` put, while reordering changes it even though
+          // the set is equal. Compute the resulting `url` and carry it
+          // forward as a stable only when it matches the old one, so
+          // downstream resources that reference `worker.url` (e.g. a GitHub
+          // Webhook delivery URL built via `Output.interpolate`) resolve it
+          // to a concrete value during planning instead of an unresolved
+          // Output — otherwise every worker update spuriously re-updates them.
+          const newCustomDomains = normalizeDomains(news.domain);
+          const newUrl =
+            newCustomDomains.length > 0
+              ? `https://${newCustomDomains[0]}`
+              : news.url !== false
+                ? (output.domains ?? []).find((u) => u.endsWith(".workers.dev"))
+                : undefined;
+          const urlStable = newUrl !== undefined && newUrl === output.url;
+          // `durableObjectNamespaces` maps each hosted DO class name to the
+          // namespace id Cloudflare assigned it. Those ids are permanent for
+          // the lifetime of a (worker, class) pair, so the map only changes
+          // when a class is added or removed — never on a plain code/config
+          // update. Carry it forward as a stable whenever the set of local DO
+          // class names is unchanged, for the same reason as `url` above:
+          // downstream resources that bind a DO namespace via
+          // `worker.durableObjectNamespaces[name]` (e.g. a Container attached
+          // to a DO) must resolve it to a concrete value during planning.
+          // Otherwise the binding holds an unresolved Output, which
+          // `diffBindings` treats as "changed", spuriously re-updating the
+          // bound resource on every deploy. Class names are structural (not the
+          // namespace id), so this comparison holds even when `newBindings` is
+          // otherwise unresolved.
+          const newDoClassNames = Array.isArray(newBindings)
+            ? getExpectedDurableObjectClassNames(
+                (newBindings as ResourceBinding<Worker["Binding"]>[]).flatMap(
+                  (b) => b.data.bindings ?? [],
+                ),
+                workerName,
+              ).sort()
+            : [];
+          const oldDoClassNames = Object.keys(
+            output.durableObjectNamespaces ?? {},
+          ).sort();
+          const doNamespacesStable =
+            oldWorkerName === workerName &&
+            newDoClassNames.length === oldDoClassNames.length &&
+            newDoClassNames.every((name, i) => name === oldDoClassNames[i]);
           if (
             domainsChanged ||
             cronsChanged ||
             (yield* hasChanged(id, news, output))
           ) {
+            const stables: string[] = [];
+            if (oldWorkerName === workerName) {
+              stables.push("workerName");
+            }
+            if (urlStable) {
+              stables.push("url");
+            }
+            if (doNamespacesStable) {
+              stables.push("durableObjectNamespaces");
+            }
             return {
               action: "update",
-              stables:
-                oldWorkerName === workerName ? ["workerName"] : undefined,
+              stables: stables.length > 0 ? stables : undefined,
             };
           }
         }),

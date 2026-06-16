@@ -167,6 +167,10 @@ export const isRegistrarDomain = (value: unknown): value is RegistrarDomain =>
 
 export const RegistrarDomainProvider = () =>
   Provider.succeed(RegistrarDomain, {
+    // `delete` never releases the registration (it only restores settings), so
+    // a domain can never be removed by teardown and would re-appear on every
+    // `nuke` scan. Skip it in account-wide teardown.
+    nuke: { skip: true },
     stables: ["domainName", "accountId", "initialSettings"],
 
     diff: Effect.fn(function* ({ olds, news, output }) {
@@ -253,6 +257,35 @@ export const RegistrarDomainProvider = () =>
       yield* registrar.putDomain({ accountId, domainName, ...delta }).pipe(
         // Lost ownership between the observe and the put — gone is done.
         Effect.catchTag("RegistrarDomainNotOwned", () => Effect.void),
+      );
+    }),
+
+    // Account-scoped collection: enumerate every domain registered with
+    // Cloudflare Registrar on the account, exhaustively paginated, and
+    // hydrate each into the exact `read` Attributes shape. There is no prior
+    // managed state for an enumerated domain, so — exactly like a cold
+    // adoption read — the observed settings become the `initialSettings`.
+    list: Effect.fn(function* () {
+      const { accountId } = yield* yield* CloudflareEnvironment;
+      return yield* registrar.listDomains.pages({ accountId }).pipe(
+        Stream.runCollect,
+        Effect.map((chunk) =>
+          Array.from(chunk).flatMap((page) =>
+            (page.result ?? [])
+              .filter(
+                (domain): domain is ObservedDomain & { name: string } =>
+                  typeof domain.name === "string",
+              )
+              .map((domain) =>
+                toAttributes(
+                  domain.name,
+                  accountId,
+                  domain,
+                  captureSettings(domain),
+                ),
+              ),
+          ),
+        ),
       );
     }),
   });

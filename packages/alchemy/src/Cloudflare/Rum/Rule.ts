@@ -1,6 +1,8 @@
 import * as rum from "@distilled.cloud/cloudflare/rum";
 import * as Effect from "effect/Effect";
 import * as Predicate from "effect/Predicate";
+import * as Schedule from "effect/Schedule";
+import * as Stream from "effect/Stream";
 
 import { Unowned } from "../../AdoptPolicy.ts";
 import { isResolved } from "../../Diff.ts";
@@ -145,6 +147,43 @@ export const RumRuleProvider = () =>
   Provider.succeed(RumRule, {
     stables: ["id", "rulesetId", "accountId", "created"],
 
+    list: Effect.fn(function* () {
+      const { accountId } = yield* yield* CloudflareEnvironment;
+      // Rules live under a RumSite's implicit ruleset and there is no
+      // account-wide rule list. Enumerate every site (paginated), collect
+      // their ruleset ids, then fan out the per-ruleset rule list and
+      // flatten — the same listRules read path each rule's `read` uses.
+      const sites = yield* rum.listSiteInfos.pages({ accountId }).pipe(
+        Stream.runCollect,
+        Effect.map((chunk) =>
+          Array.from(chunk).flatMap((page) => page.result ?? []),
+        ),
+      );
+      const rulesetIds = Array.from(
+        new Set(
+          sites
+            .map((site) => site.ruleset?.id ?? undefined)
+            .filter((id): id is string => id !== undefined),
+        ),
+      );
+      const rows = yield* Effect.forEach(
+        rulesetIds,
+        (rulesetId) =>
+          listRules(accountId, rulesetId).pipe(
+            Effect.map((rules) =>
+              (rules ?? []).map((rule) =>
+                toAttributes(rule, rulesetId, accountId),
+              ),
+            ),
+            // A freshly minted scoped token can briefly 403 across the
+            // edge — skip rulesets we momentarily can't read.
+            Effect.catchTag("Forbidden", () => Effect.succeed([])),
+          ),
+        { concurrency: 10 },
+      );
+      return rows.flat();
+    }),
+
     diff: Effect.fn(function* ({ news, output }) {
       const { accountId } = yield* yield* CloudflareEnvironment;
       if (!isResolved(news)) return undefined;
@@ -216,14 +255,28 @@ export const RumRuleProvider = () =>
       //    `priority`, so re-read the rule from the list for the complete
       //    state.
       if (!observed) {
-        const created = yield* rum.createRule({
-          accountId,
-          rulesetId,
-          host: news.host,
-          paths: news.paths ?? [],
-          inclusive: news.inclusive ?? true,
-          isPaused: news.isPaused ?? false,
-        });
+        const created = yield* rum
+          .createRule({
+            accountId,
+            rulesetId,
+            host: news.host,
+            paths: news.paths ?? [],
+            inclusive: news.inclusive ?? true,
+            isPaused: news.isPaused ?? false,
+          })
+          .pipe(
+            // The implicit ruleset of a freshly-created RumSite is eventually
+            // consistent: a createRule issued immediately after the site
+            // deploy can briefly 404 (`RulesetNotFound`, code
+            // `web_analytics.configuration.api.notFound`) before the ruleset is
+            // visible. Ride out the propagation window with a bounded retry.
+            Effect.retry({
+              while: (e) => e._tag === "RulesetNotFound",
+              schedule: Schedule.exponential("500 millis").pipe(
+                Schedule.both(Schedule.recurs(8)),
+              ),
+            }),
+          );
         const fresh = yield* listRules(accountId, rulesetId);
         observed =
           fresh?.find((rule) => rule.id === created.id) ?? toRule(created);

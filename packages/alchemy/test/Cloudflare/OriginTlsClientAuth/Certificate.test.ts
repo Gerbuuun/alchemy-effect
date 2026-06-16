@@ -1,6 +1,7 @@
 import * as Cloudflare from "@/Cloudflare";
 import { CloudflareEnvironment } from "@/Cloudflare/CloudflareEnvironment";
 import { findZoneByName } from "@/Cloudflare/Zone/lookup";
+import * as Provider from "@/Provider";
 import * as Test from "@/Test/Vitest";
 import * as originTls from "@distilled.cloud/cloudflare/origin-tls-client-auth";
 import { expect } from "@effect/vitest";
@@ -86,7 +87,15 @@ const purgeCertificates = (zoneId: string) =>
       (c) =>
         originTls
           .deleteOriginTlsClientAuth({ zoneId, certificateId: c.id! })
-          .pipe(Effect.catchTag("CertificateNotFound", () => Effect.void)),
+          .pipe(
+            // Deletion is idempotent: a cert that flipped into (or past)
+            // deletion between the list and this call answers HTTP 400
+            // "Certificate is already deleted." — both mean it is gone.
+            Effect.catchTag(
+              ["CertificateNotFound", "CertificateAlreadyDeleted"],
+              () => Effect.void,
+            ),
+          ),
     );
   });
 
@@ -163,6 +172,43 @@ test.provider(
       yield* stack.destroy();
 
       yield* waitForGone(zoneId, replaced.certificateId);
+    }).pipe(logLevel),
+  { timeout: 120_000 },
+);
+
+// Canonical `list()` test (zone-scoped collection): `list()` fans out over
+// every zone via `listAllZones` and enumerates the per-zone certificate store,
+// hydrating each into the same `read` Attributes shape. Deploy a certificate
+// to the standing test zone and assert it appears in the exhaustive result.
+test.provider(
+  "list enumerates the deployed zone client certificate",
+  (stack) =>
+    Effect.gen(function* () {
+      const zoneId = yield* resolveZoneId;
+
+      yield* stack.destroy();
+      yield* purgeCertificates(zoneId);
+
+      const cert = yield* stack.deploy(
+        Cloudflare.OriginTlsClientAuthCertificate("ListCert", {
+          zoneId,
+          certificate: CERT_1,
+          privateKey: Redacted.make(KEY_1),
+        }),
+      );
+
+      const provider = yield* Provider.findProvider(
+        Cloudflare.OriginTlsClientAuthCertificate,
+      );
+      const all = yield* provider.list();
+
+      const found = all.find((c) => c.certificateId === cert.certificateId);
+      expect(found).toBeDefined();
+      expect(found?.zoneId).toEqual(zoneId);
+
+      yield* stack.destroy();
+
+      yield* waitForGone(zoneId, cert.certificateId);
     }).pipe(logLevel),
   { timeout: 120_000 },
 );

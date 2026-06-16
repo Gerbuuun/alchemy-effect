@@ -266,6 +266,7 @@ export const DeviceDefaultProfile = Resource<DeviceDefaultProfile>(
  */
 export const DeviceDefaultProfileProvider = () =>
   Provider.succeed(DeviceDefaultProfile, {
+    nuke: { singleton: true },
     stables: ["accountId"],
     reconcile: Effect.fn(function* ({ news = {} }) {
       const { accountId } = yield* yield* CloudflareEnvironment;
@@ -432,6 +433,14 @@ export const DeviceDefaultProfileProvider = () =>
       const { accountId } = yield* yield* CloudflareEnvironment;
       const obs = yield* observe();
       return buildAttrs(accountId, obs);
+    }),
+    // Account-scoped singleton: there is exactly one default device profile
+    // per account and no enumeration API. Mirror `read` and return the single
+    // profile as a one-element array.
+    list: Effect.fn(function* () {
+      const { accountId } = yield* yield* CloudflareEnvironment;
+      const obs = yield* observe();
+      return [buildAttrs(accountId, obs)];
     }),
   });
 

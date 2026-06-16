@@ -88,6 +88,7 @@ export const isWorkersSubdomain = (value: unknown): value is WorkersSubdomain =>
 
 export const WorkersSubdomainProvider = () =>
   Provider.succeed(WorkersSubdomain, {
+    nuke: { singleton: true },
     stables: ["accountId", "initialSubdomain"],
 
     diff: Effect.fn(function* ({ output }) {
@@ -115,6 +116,23 @@ export const WorkersSubdomainProvider = () =>
         initialSubdomain:
           output !== undefined ? output.initialSubdomain : observed,
       };
+    }),
+
+    list: Effect.fn(function* () {
+      const { accountId } = yield* yield* CloudflareEnvironment;
+      // Account singleton — at most one workers.dev subdomain per account.
+      // Mirror `read` with no prior output: the observed name is also the
+      // `initialSubdomain`. Return a one-element array when registered, `[]`
+      // when the account has never claimed a subdomain.
+      const observed = yield* getSubdomain(accountId);
+      if (observed === undefined) return [];
+      return [
+        {
+          accountId,
+          subdomain: observed,
+          initialSubdomain: observed,
+        },
+      ];
     }),
 
     reconcile: Effect.fn(function* ({ news, output }) {
