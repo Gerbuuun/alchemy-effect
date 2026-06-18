@@ -214,7 +214,9 @@ export type ZoneDnsSettings = Resource<
  * Some fields are plan-gated: `foundationDns` is a paid add-on,
  * `nameservers.type: "custom.*"` requires account custom nameservers,
  * `internalDns` and `secondaryOverrides` are Enterprise features.
- *
+ * @resource
+ * @product DNS
+ * @category Domains & DNS
  * @section Basic settings
  * @example Lower the NS record TTL
  * ```typescript
@@ -284,6 +286,9 @@ export const ZoneDnsSettingsProvider = () =>
               return attributes;
             }),
             // Plan-gated or partial zones reject the route; skip them.
+            // (Transient 403/429 "Authentication error" blips under
+            // concurrency are retried globally by the Cloudflare retry policy,
+            // so they never reach here as a real failure.)
             Effect.catchTag("InvalidRoute", () => Effect.succeed(undefined)),
           ),
         { concurrency: 10 },

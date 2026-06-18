@@ -56,7 +56,9 @@ export type VectorizeMetadataIndex = Resource<
  * A metadata index is identified by its parent index and `propertyName` and
  * is immutable — changing the property name, type, or parent index triggers
  * a replacement.
- *
+ * @resource
+ * @product Vectorize
+ * @category AI
  * @section Creating a Metadata Index
  * @example Index a string metadata property
  * ```typescript
@@ -187,6 +189,12 @@ export const VectorizeMetadataIndexProvider = () =>
               .map((index) => index.name)
               .filter((name): name is string => name != null),
           ),
+        ),
+        // A parent index deleted by a concurrent operation mid-enumeration
+        // can fail the account-scoped pagination with "index deleted" (typed
+        // as Gone) — skip the whole enumeration rather than throw.
+        Effect.catchTag(["NotFound", "Gone"], () =>
+          Effect.succeed<string[]>([]),
         ),
       );
 

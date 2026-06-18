@@ -106,7 +106,9 @@ export type RealtimeKitWebhook = Resource<
  *
  * Name, URL, events, and enablement are all mutable in place; only moving
  * the webhook to a different app forces a replacement.
- *
+ * @resource
+ * @product Realtime Kit
+ * @category Media
  * @section Creating a Webhook
  * @example Meeting lifecycle events
  * ```typescript
@@ -215,14 +217,44 @@ export const RealtimeKitWebhookProvider = () =>
 
       if (!observed) {
         // Ensure — greenfield (or out-of-band delete): create with the full
-        // desired body. Webhook names are not unique so there is no
-        // AlreadyExists race to tolerate.
-        const created = yield* realtimeKit.createWebhookWebhook({
+        // desired body. The API rejects a duplicate name in the same app
+        // with a 409 (`RealtimeKitWebhookExists`); this happens when a prior
+        // run leaked a same-named webhook (lost state) or when a retried
+        // create races a 500 that actually persisted. Adopt the existing
+        // webhook by name and converge it to the desired body instead of
+        // leaking / failing.
+        const created = yield* realtimeKit
+          .createWebhookWebhook({ accountId, appId, ...desired })
+          .pipe(
+            Effect.catchTag("RealtimeKitWebhookExists", () =>
+              Effect.succeed(undefined),
+            ),
+          );
+        if (created) {
+          return toAttributes(created.data, accountId, appId);
+        }
+        const existing = yield* findByName(accountId, appId, name);
+        if (!existing) {
+          // Conflict reported but the webhook isn't visible yet — let the
+          // engine retry the reconcile rather than silently succeeding.
+          return yield* realtimeKit
+            .createWebhookWebhook({ accountId, appId, ...desired })
+            .pipe(
+              Effect.map((res) => toAttributes(res.data, accountId, appId)),
+            );
+        }
+        yield* realtimeKit.replaceWebhookWebhook({
           accountId,
           appId,
+          webhookId: existing.id,
           ...desired,
         });
-        return toAttributes(created.data, accountId, appId);
+        const adopted = yield* realtimeKit.getWebhookByIdWebhook({
+          accountId,
+          appId,
+          webhookId: existing.id,
+        });
+        return toAttributes(adopted.data, accountId, appId);
       }
 
       // Sync — diff observed cloud state against desired; the update API is

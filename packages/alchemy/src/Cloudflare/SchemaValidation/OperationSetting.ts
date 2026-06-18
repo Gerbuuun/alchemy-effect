@@ -76,7 +76,9 @@ export type SchemaValidationOperationSetting = Resource<
  * The override is keyed by the operation's UUID; deleting the resource
  * clears the override so the operation falls back to the zone default.
  * Deleting the underlying API Shield operation cascades the override away.
- *
+ * @resource
+ * @product Schema Validation
+ * @category Application Security
  * @section Overriding an operation
  * @example Block non-conforming requests on one operation
  * ```typescript
@@ -153,8 +155,11 @@ export const SchemaValidationOperationSettingProvider = () =>
                     ),
                 ),
               ),
-              // Zones without API Shield / schema validation reject the
-              // route; skip them rather than fail the whole enumeration.
+              // A zone with no API Shield / schema-validation entitlement
+              // rejects the route — skip it, keep the rest. (Transient
+              // code-10000 "Authentication error" blips under concurrency are
+              // retried globally by the Cloudflare retry policy, so they never
+              // reach here as a real failure.)
               Effect.catchTag("InvalidRoute", () => Effect.succeed([])),
             ),
         { concurrency: 10 },

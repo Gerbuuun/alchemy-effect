@@ -109,7 +109,7 @@ export interface Webhook extends Resource<
  * {@link import("./RepositoryEventSource.ts").events | events(repository).subscribe(...)}
  * inside a Cloudflare Worker, which provisions the webhook, wires the
  * delivery URL to the Worker, and forwards verified events to your handler.
- *
+ * @resource
  * @section Creating a Webhook
  * @example Forward push events to a URL
  * ```typescript
@@ -204,6 +204,53 @@ export const WebhookProvider = () =>
         }),
       );
       return toAttrs(data);
+    }),
+
+    // GitHub has no global webhook list — hooks are repo-scoped. Enumerate every
+    // repository the authenticated token can see, then list each repo's webhooks.
+    list: Effect.fn(function* () {
+      const octokit = yield* Octokit;
+
+      // `octokit.paginate` walks every page and flattens to a single array.
+      const repos = yield* Effect.tryPromise({
+        try: () =>
+          octokit.paginate(octokit.rest.repos.listForAuthenticatedUser, {
+            per_page: 100,
+          }),
+        catch: (e) => e as Error,
+      });
+
+      const perRepo = yield* Effect.forEach(
+        repos,
+        (repo) =>
+          Effect.tryPromise({
+            try: async () => {
+              try {
+                const hooks = await octokit.paginate(
+                  octokit.rest.repos.listWebhooks,
+                  {
+                    owner: repo.owner.login,
+                    repo: repo.name,
+                    per_page: 100,
+                  },
+                );
+                return hooks.map(toAttrs);
+              } catch (error: any) {
+                // Repos where the token lacks admin access reject the webhooks
+                // endpoint with 403/404 — skip them per the per-item not-found
+                // rule rather than failing the whole enumeration.
+                if (error.status === 403 || error.status === 404) {
+                  return [];
+                }
+                throw error;
+              }
+            },
+            catch: (e) => e as Error,
+          }),
+        { concurrency: 10 },
+      );
+
+      return perRepo.flat();
     }),
 
     delete: Effect.fn(function* ({ olds, output }) {

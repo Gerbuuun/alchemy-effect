@@ -1,6 +1,7 @@
 import * as diagnostics from "@distilled.cloud/cloudflare/diagnostics";
 import * as Effect from "effect/Effect";
 import * as Predicate from "effect/Predicate";
+import * as Schedule from "effect/Schedule";
 
 import { Unowned } from "../../AdoptPolicy.ts";
 import { isResolved } from "../../Diff.ts";
@@ -71,7 +72,9 @@ export type EndpointHealthcheck = Resource<
  * IPs with the typed `InvalidHealthcheckEndpoint` error. The `endpoint` is
  * mutable in place via PUT (the UUID is stable across updates), but `name`
  * is create-only — changing it triggers a replacement.
- *
+ * @resource
+ * @product Diagnostics
+ * @category Observability & Analytics
  * @section Creating an endpoint healthcheck
  * @example Probe an on-net host
  * ```typescript
@@ -161,8 +164,12 @@ export const EndpointHealthcheckProvider = () =>
 
       // Observe — the id cached on `output` is a hint, not a guarantee:
       // a "No entry found" falls through to missing and we recreate.
+      // A GET right after a prior create can transiently 404 while the
+      // new healthcheck propagates; bounded-retry on the typed
+      // `EndpointHealthcheckNotFound` before concluding it is gone, so a
+      // propagation blip never leaks a duplicate (names are not unique).
       const observed = output?.healthcheckId
-        ? yield* getHealthcheck(
+        ? yield* observeExisting(
             output.accountId ?? accountId,
             output.healthcheckId,
           )
@@ -240,6 +247,27 @@ type ObservedHealthcheck = diagnostics.GetEndpointHealthcheckResponse & {
 const getHealthcheck = (accountId: string, id: string) =>
   diagnostics.getEndpointHealthcheck({ accountId, id }).pipe(
     Effect.map((hc): ObservedHealthcheck => ({ ...hc, accountId })),
+    Effect.catchTag("EndpointHealthcheckNotFound", () =>
+      Effect.succeed(undefined),
+    ),
+  );
+
+/**
+ * Observe a healthcheck we believe exists (its id is cached on `output`).
+ * A GET issued right after a create can transiently 404 while the new
+ * state propagates, so bounded-retry on the typed
+ * `EndpointHealthcheckNotFound` before treating the resource as gone —
+ * this prevents a propagation blip from triggering a duplicate create.
+ */
+const observeExisting = (accountId: string, id: string) =>
+  diagnostics.getEndpointHealthcheck({ accountId, id }).pipe(
+    Effect.map((hc): ObservedHealthcheck => ({ ...hc, accountId })),
+    Effect.retry({
+      while: (e) => e._tag === "EndpointHealthcheckNotFound",
+      schedule: Schedule.exponential("500 millis").pipe(
+        Schedule.both(Schedule.recurs(6)),
+      ),
+    }),
     Effect.catchTag("EndpointHealthcheckNotFound", () =>
       Effect.succeed(undefined),
     ),

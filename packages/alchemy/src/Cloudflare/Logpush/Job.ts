@@ -221,7 +221,9 @@ export type LogpushJob = Resource<
  * Jobs can be account-scoped (default) or zone-scoped (pass `zoneId`).
  * The dataset, kind, and scope are fixed at creation — changing any of
  * them triggers a replacement; everything else updates in place.
- *
+ * @resource
+ * @product Logpush
+ * @category Observability & Analytics
  * @section Pushing Workers trace events to R2
  * @example Account-scoped job writing to an R2 bucket
  * The R2 destination authenticates with S3-compatible credentials embedded
@@ -373,8 +375,14 @@ export const LogpushJobProvider = () =>
                   ),
               ),
             ),
-            // Plan-gated / partial zones reject the route; skip them.
-            Effect.catchTag("InvalidRoute", () => Effect.succeed([])),
+            // Best-effort account-wide fan-out: a zone the token can't read
+            // for Logpush (plan-gated route, missing permission, or a code-
+            // 10000 auth blip) must be skipped, not fail the whole
+            // enumeration. Drop only that zone and keep the rest.
+            Effect.catchTag(
+              ["InvalidRoute", "Unauthorized", "Forbidden", "NotFound"],
+              () => Effect.succeed([]),
+            ),
           ),
         { concurrency: 10 },
       );

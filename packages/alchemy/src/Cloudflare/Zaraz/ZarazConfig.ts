@@ -153,7 +153,9 @@ export type ZarazConfigAttributes = {
  * Destroy keeps the current Zaraz config by default to avoid wiping unrelated
  * zone-level analytics setup. Set `delete: true` to restore Cloudflare's
  * default Zaraz config on destroy.
- *
+ * @resource
+ * @product Zaraz
+ * @category Performance & Reliability
  * @section Managing Zaraz
  * @example Enable data layer compatibility
  * ```typescript
@@ -208,9 +210,15 @@ export const ZarazConfigProvider = () =>
         allZones.map((zone) => zone.id),
         (zoneId) =>
           observe(zoneId).pipe(
-            // Zones where Zaraz isn't provisioned (e.g. partial setups)
-            // reject the route; skip them.
-            Effect.catchTag("InvalidRoute", () => Effect.succeed(undefined)),
+            // Best-effort account-wide fan-out: a zone where Zaraz isn't
+            // provisioned (rejects the route) or that the token can't read
+            // (missing permission / code-10000 auth blip surfaced as
+            // Unauthorized, or a 403/404) must be skipped, not fail the whole
+            // enumeration.
+            Effect.catchTag(
+              ["InvalidRoute", "Unauthorized", "Forbidden", "NotFound"],
+              () => Effect.succeed(undefined),
+            ),
           ),
         { concurrency: 10 },
       );

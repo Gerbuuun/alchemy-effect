@@ -244,7 +244,9 @@ export type AiGatewayDynamicRouting = Resource<
  * new version and deploys it; the reconciler also re-deploys when the live
  * deployed version drifts from the desired graph. Renames are applied in
  * place; only moving the route to a different gateway forces a replacement.
- *
+ * @resource
+ * @product AI Gateway
+ * @category AI
  * @section Creating a Route
  * @example Route all traffic to one model
  * ```typescript
@@ -487,12 +489,16 @@ export const AiGatewayDynamicRoutingProvider = () =>
  * Exhaustively list every route in a gateway. `listDynamicRoutings` is not a
  * paginated distilled operation (the Cloudflare response carries only
  * `page`/`per_page`, no total), so page manually until a short page signals
- * the end. Each route item is hydrated into the exact `read` Attributes shape.
+ * the end.
+ *
+ * The list endpoint omits each route's element graph — its items carry only
+ * deployment/version metadata, no `version.data` — so hydrate every route with
+ * a per-route `get` to populate `elements` into the exact `read` shape.
  */
 const listRoutes = (accountId: string, gatewayId: string) =>
   Effect.gen(function* () {
     const perPage = 50;
-    const acc: AiGatewayDynamicRoutingAttributes[] = [];
+    const ids: string[] = [];
     for (let page = 1; ; page++) {
       const response = yield* aiGateway.listDynamicRoutings({
         accountId,
@@ -502,11 +508,18 @@ const listRoutes = (accountId: string, gatewayId: string) =>
       });
       const routes = response.data.routes;
       for (const route of routes) {
-        acc.push(toAttributes(route, accountId));
+        ids.push(route.id);
       }
       if (routes.length < perPage) break;
     }
-    return acc;
+    const hydrated = yield* Effect.forEach(
+      ids,
+      (id) => getRoute(accountId, gatewayId, id),
+      { concurrency: 10 },
+    );
+    return hydrated
+      .filter((r) => r !== undefined)
+      .map((route) => toAttributes(route, accountId));
   });
 
 /**

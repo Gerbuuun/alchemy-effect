@@ -90,7 +90,9 @@ export type SnippetRules = Resource<
  * Safety: when there is no prior state and the zone already has a
  * non-empty rule list, `read` reports it as `Unowned` and the engine
  * refuses to take it over unless `--adopt` (or `adopt(true)`) is set.
- *
+ * @resource
+ * @product Snippets
+ * @category Rules & Configuration
  * @section Activating Snippets
  * @example Route a path through a snippet
  * ```typescript
@@ -135,9 +137,13 @@ export const SnippetRulesProvider = () =>
             Effect.map((rules): SnippetRulesAttributes | undefined =>
               rules.length === 0 ? undefined : { zoneId, rules },
             ),
-            // Plan-gated zones (and eventually-consistent token 403s)
-            // reject the route; skip them.
-            Effect.catchTag("Forbidden", () => Effect.succeed(undefined)),
+            // Plan-gated zones (and eventually-consistent token 401/403s)
+            // reject the route; skip them. (`listObservedRules` already maps
+            // the snippet-rules 404 to an empty list, which becomes
+            // `undefined` above.)
+            Effect.catchTag(["Forbidden", "Unauthorized"], () =>
+              Effect.succeed(undefined),
+            ),
           ),
         { concurrency: 10 },
       );

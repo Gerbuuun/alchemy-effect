@@ -143,7 +143,9 @@ export type Organization = Resource<
  * state, `read` scans for an existing organization with the same name
  * (and parent) and reports it as `Unowned`, so the engine refuses to take
  * it over unless `--adopt` (or `adopt(true)`) is set.
- *
+ * @resource
+ * @product Organizations
+ * @category Account & Identity
  * @section Creating an Organization
  * @example Basic organization
  * ```typescript
@@ -198,7 +200,8 @@ export const OrganizationProvider = () =>
     // beyond the token), so there is no env scope to resolve — just paginate
     // exhaustively and map each row to the same `Attributes` shape `read`
     // returns. The op is entitlement-gated: on an unentitled account it
-    // rejects with the typed `Forbidden` error (which propagates).
+    // rejects with the typed `Forbidden` error, which `list()` tolerates
+    // (returns `[]`) so account-wide enumeration / `nuke` never blows up.
     list: () =>
       organizations.listOrganizations.pages({}).pipe(
         Stream.runCollect,

@@ -72,7 +72,9 @@ export type ApiShieldLabel = Resource<
  * characters), so renaming triggers a replacement; only the `description`
  * is mutable in place. Deleting a label detaches it from any operations
  * server-side.
- *
+ * @resource
+ * @product API Shield
+ * @category Application Security
  * @section Creating a Label
  * @example Label with a generated name
  * ```typescript
@@ -123,9 +125,16 @@ export const ApiShieldLabelProvider = () =>
                 ),
               ),
             ),
-            // Zones without the API Shield entitlement reject the
-            // route; skip them rather than fail the whole enumeration.
-            Effect.catchTag("Forbidden", () => Effect.succeed([])),
+            // A zone may genuinely vanish mid-enumeration: a concurrent
+            // delete purged it (ZonePurged, Cloudflare code 10410), it lacks
+            // the route (InvalidRoute), or it's already gone (NotFound). Skip
+            // that zone rather than fail the whole enumeration. (Transient
+            // code-10000 "Authentication error" blips under concurrency are
+            // retried globally by the Cloudflare retry policy, so they never
+            // reach here as a real failure.)
+            Effect.catchTag(["ZonePurged", "InvalidRoute", "NotFound"], () =>
+              Effect.succeed([]),
+            ),
           ),
         { concurrency: 10 },
       );

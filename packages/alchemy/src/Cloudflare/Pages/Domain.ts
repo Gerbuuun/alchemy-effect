@@ -114,7 +114,9 @@ export type PagesDomain = Resource<
  *
  * Both properties are the attachment's identity, so every change triggers a
  * replacement (detach + attach).
- *
+ * @resource
+ * @product Pages
+ * @category Workers & Compute
  * @section Attaching a Domain
  * @example Custom domain with its CNAME record
  * ```typescript
@@ -333,10 +335,14 @@ const toAttributes = (
   projectName,
   name: domain.name,
   status: domain.status,
-  certificateAuthority: domain.certificateAuthority,
-  validationStatus: domain.validationData.status,
-  validationMethod: domain.validationData.method,
-  verificationStatus: domain.verificationData.status,
-  zoneTag: domain.zoneTag,
+  // While a domain is still `initializing`/`pending`, Cloudflare omits the
+  // certificate authority, validation/verification blocks and (for an
+  // off-account zone) the zone tag entirely — coalesce to "" so the
+  // Attributes shape stays stable across the async activation lifecycle.
+  certificateAuthority: domain.certificateAuthority ?? "",
+  validationStatus: domain.validationData?.status ?? "",
+  validationMethod: domain.validationData?.method ?? "",
+  verificationStatus: domain.verificationData?.status ?? "",
+  zoneTag: domain.zoneTag ?? "",
   createdOn: domain.createdOn,
 });

@@ -1,6 +1,7 @@
 import * as originCa from "@distilled.cloud/cloudflare/origin-ca-certificates";
 import * as Effect from "effect/Effect";
 import * as Predicate from "effect/Predicate";
+import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 
 import { Unowned } from "../../AdoptPolicy.ts";
@@ -114,7 +115,9 @@ export type OriginCaCertificate = Resource<
  * Certificates are fully immutable: there is no update API, so changing any
  * property triggers a replacement (a new certificate is issued, then the
  * old one is revoked). Destroying the resource revokes the certificate.
- *
+ * @resource
+ * @product Origin CA Certificates
+ * @category SSL/TLS & Certificates
  * @section Issuing a certificate
  * @example RSA certificate for a single hostname
  * ```typescript
@@ -281,11 +284,32 @@ export const OriginCaCertificateProvider = () =>
     delete: Effect.fn(function* ({ output }) {
       // Delete = revoke. Idempotent: an unknown id (1101) or an
       // already-revoked certificate (1014) both mean "gone".
+      //
+      // `CertificateRevocationFailed` (code 1000) is the dual-use generic
+      // "API errors encountered" Cloudflare returns when a revoke blips —
+      // most often during the replace-time GC delete, when the old
+      // certificate is revoked right after its replacement was issued.
+      // Left untyped it surfaced as `UnknownCloudflareError` and aborted the
+      // delete, orphaning the old certificate (it is no longer in state, so
+      // a later `stack.destroy()` cannot reclaim it). Bounded-retry the
+      // transient failure, then read back: a revoked/absent certificate
+      // counts as deleted; a still-live one re-raises so the leak is never
+      // silent.
       yield* originCa
         .deleteOriginCaCertificate({ certificateId: output.certificateId })
         .pipe(
+          Effect.retry({
+            while: (e) => e._tag === "CertificateRevocationFailed",
+            schedule: Schedule.exponential("500 millis"),
+            times: 6,
+          }),
           Effect.catchTag("CertificateNotFound", () => Effect.void),
           Effect.catchTag("CertificateAlreadyRevoked", () => Effect.void),
+          Effect.catchTag("CertificateRevocationFailed", (e) =>
+            getCertificate(output.certificateId).pipe(
+              Effect.flatMap((cert) => (cert ? Effect.fail(e) : Effect.void)),
+            ),
+          ),
         );
     }),
   });

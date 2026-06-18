@@ -84,7 +84,9 @@ export type OriginPostQuantumEncryption = Resource<
  * observed value differs from the desired one; destroy restores the value
  * the setting had before Alchemy first managed it (captured as
  * `initialValue`).
- *
+ * @resource
+ * @product Origin Post-Quantum Encryption
+ * @category SSL/TLS & Certificates
  * @section Managing the setting
  * @example Prefer post-quantum key agreement to the origin
  * ```typescript
@@ -143,7 +145,10 @@ export const OriginPostQuantumEncryptionProvider = () =>
             Effect.map((observed) =>
               toAttributes(zoneId, observed, toValue(observed.value)),
             ),
-            // Zone gone out-of-band / not resolvable — skip it.
+            // Zone gone out-of-band / not resolvable — skip it. (Transient
+            // 403/429 "Authentication error" blips under concurrency are
+            // retried globally by the Cloudflare retry policy, so they never
+            // reach here as a real failure.)
             Effect.catchTag("InvalidZoneIdentifier", () =>
               Effect.succeed(undefined),
             ),
