@@ -121,7 +121,15 @@ const wrapWorkflowEvent = (event: any): WorkflowEventService["Service"] => ({
 
 const wrapWorkflowStep = (step: any): WorkflowStep["Service"] => ({
   do: <T>(options: WorkflowTaskOptions<T, any, any>): Effect.Effect<T> => {
-    const { name, effect } = options;
+    const { name } = options;
+    // The surrounding body context is already provided in `task`; the bridge
+    // supplies `WorkflowStepContext` and runs the step to completion, so the
+    // effect is fully satisfied (R = never) at this boundary.
+    const effect = options.effect as Effect.Effect<
+      T,
+      never,
+      WorkflowStepContext
+    >;
     const config = toWorkflowStepConfig(options);
     const rollbackEffect = options.rollback;
     const callback = (context: any) =>
@@ -141,7 +149,7 @@ const wrapWorkflowStep = (step: any): WorkflowStep["Service"] => ({
               rollbackEffect({
                 error: context.error,
                 output: context.output,
-              }),
+              }) as Effect.Effect<void>,
             ),
           rollbackConfig: options.rollbackConfig,
         }
@@ -167,7 +175,7 @@ const wrapWorkflowStep = (step: any): WorkflowStep["Service"] => ({
 });
 
 const toWorkflowStepConfig = (
-  options: WorkflowTaskOptions,
+  options: WorkflowTaskOptions<any, any, any>,
 ): WorkflowStepConfig | undefined => {
   if (!options.retries && !options.timeout) return undefined;
   return { retries: options.retries, timeout: options.timeout };

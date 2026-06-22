@@ -18,18 +18,20 @@ export default class TestWorkflow extends Cloudflare.Workflow<TestWorkflow>()(
       const env = yield* Cloudflare.WorkerEnvironment;
       const event = yield* Cloudflare.WorkflowEvent;
 
-      const greeted = yield* Cloudflare.task({
-        name: "greet",
-        retries: { limit: 3, delay: "1 second", backoff: "linear" },
-        timeout: "1 minute",
-        effect: Effect.gen(function* () {
+      const greeted = yield* Cloudflare.task(
+        "greet",
+        Effect.gen(function* () {
           const context = yield* Cloudflare.WorkflowStepContext;
           return {
             text: `Hello, ${input.value}!`,
             attempt: context.attempt,
           };
         }),
-      });
+        {
+          retries: { limit: 3, delay: "1 second", backoff: "linear" },
+          timeout: "1 minute",
+        },
+      );
 
       if (input.wait) {
         const external = yield* Cloudflare.waitForEvent<{ message: string }>(
@@ -48,18 +50,20 @@ export default class TestWorkflow extends Cloudflare.Workflow<TestWorkflow>()(
 
       yield* Cloudflare.sleep("cooldown", "1 second");
 
-      const finalized = yield* Cloudflare.task({
-        name: "finalize",
-        effect: Effect.succeed({
+      const finalized = yield* Cloudflare.task(
+        "finalize",
+        Effect.succeed({
           greeting: greeted.text,
           envBindingCount: Object.keys(env).length,
           workflowName: event.workflowName,
           stepAttempt: greeted.attempt,
           instanceId: event.instanceId,
         }),
-        rollback: () => Effect.void,
-        rollbackConfig: { retries: { limit: 1, delay: "1 second" } },
-      });
+        {
+          rollback: () => Effect.void,
+          rollbackConfig: { retries: { limit: 1, delay: "1 second" } },
+        },
+      );
 
       return finalized;
     });

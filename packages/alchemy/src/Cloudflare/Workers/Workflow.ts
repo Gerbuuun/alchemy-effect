@@ -81,20 +81,30 @@ export interface WorkflowRollbackOptions<Output = unknown, R = never> {
 }
 
 /**
- * A durable workflow step. Keep the name, Effect, retry config, timeout, and
- * rollback handler together in one object.
+ * Optional configuration for a `task` step: retry policy, timeout, and a
+ * rollback handler with its own retry config.
+ */
+export interface WorkflowTaskConfig<
+  Output = unknown,
+  RollbackReq = never,
+> extends WorkflowStepConfig {
+  rollback?: (
+    context: WorkflowRollbackContext<Output>,
+  ) => Effect.Effect<void, never, RollbackReq>;
+  rollbackConfig?: WorkflowStepConfig;
+}
+
+/**
+ * Internal step descriptor passed from `task` to the bridge. Bundles the step
+ * name and Effect together with the `WorkflowTaskConfig` fields.
  */
 export interface WorkflowTaskOptions<
   Output = unknown,
   R = never,
   RollbackReq = never,
-> extends WorkflowStepConfig {
+> extends WorkflowTaskConfig<Output, RollbackReq> {
   name: string;
   effect: Effect.Effect<Output, never, R>;
-  rollback?: (
-    context: WorkflowRollbackContext<Output>,
-  ) => Effect.Effect<void, never, RollbackReq>;
-  rollbackConfig?: WorkflowStepConfig;
 }
 
 export interface WorkflowWaitForEventOptions {
@@ -140,11 +150,13 @@ export class WorkflowStep extends Context.Service<
  * capturing the surrounding workflow body's context and providing it to
  * the inner effect before it runs inside `step.do`.
  *
- * `task` takes one options object so the step name, Effect, retry config, and
- * rollback handler stay together.
+ * The step name comes first, followed by the Effect. Retry config, timeout,
+ * and a rollback handler can be passed in the optional third `options` arg.
  */
 export function task<T, R = never, RollbackReq = never>(
-  options: WorkflowTaskOptions<T, R, RollbackReq>,
+  name: string,
+  effect: Effect.Effect<T, never, R>,
+  options?: WorkflowTaskConfig<T, RollbackReq>,
 ): Effect.Effect<
   T,
   never,
@@ -154,16 +166,15 @@ export function task<T, R = never, RollbackReq = never>(
     const step = yield* WorkflowStep;
     const context =
       yield* Effect.context<ExcludeWorkflowStepContext<R | RollbackReq>>();
-    const rollbackEffect = options.rollback;
-    const rollbackConfig = options.rollbackConfig;
+    const rollbackEffect = options?.rollback;
     return yield* step.do({
       ...options,
-      effect: options.effect.pipe(Effect.provide(context)),
+      name,
+      effect: effect.pipe(Effect.provide(context)),
       rollback: rollbackEffect
         ? (rollbackContext: WorkflowRollbackContext<T>) =>
             rollbackEffect(rollbackContext).pipe(Effect.provide(context))
         : undefined,
-      rollbackConfig,
     } as WorkflowTaskOptions<T, any, any>);
   });
 }
@@ -383,8 +394,8 @@ export class WorkflowScope extends Context.Service<
  * Objects. The outer `Effect.gen` resolves shared dependencies. The inner
  * `Effect.fn` is the workflow body — a function from a typed `input`
  * payload to an Effect that runs steps using `task`, `sleep`, and
- * `sleepUntil`. `task` keeps the step name, Effect, retry config, timeout,
- * and rollback handler in one object.
+ * `sleepUntil`. `task` takes the step name and Effect, plus an optional
+ * config object for retries, timeout, and a rollback handler.
  *
  * ```typescript
  * Effect.gen(function* () {
@@ -393,10 +404,7 @@ export class WorkflowScope extends Context.Service<
  *
  *   return Effect.fn(function* (input: { orderId: string }) {
  *     // Phase 2: workflow body (durable steps)
- *     const result = yield* Cloudflare.task({
- *       name: "process",
- *       effect: doWork(input.orderId),
- *     });
+ *     const result = yield* Cloudflare.task("process", doWork(input.orderId));
  *     yield* Cloudflare.sleep("cooldown", "10 seconds");
  *     return result;
  *   });
@@ -423,29 +431,27 @@ export class WorkflowScope extends Context.Service<
  * @section Step Primitives
  * @example Running a named task
  * ```typescript
- * const result = yield* Cloudflare.task({
- *   name: "process-order",
- *   effect: Effect.succeed({ orderId: "abc", total: 42 }),
- * });
+ * const result = yield* Cloudflare.task(
+ *   "process-order",
+ *   Effect.succeed({ orderId: "abc", total: 42 }),
+ * );
  * ```
  *
  * @example Configuring retries and reading step context
  * ```typescript
- * const result = yield* Cloudflare.task({
- *   name: "call-api",
- *   retries: { limit: 3, delay: "5 seconds", backoff: "linear" },
- *   effect: Effect.gen(function* () {
+ * const result = yield* Cloudflare.task(
+ *   "call-api",
+ *   Effect.gen(function* () {
  *     const context = yield* Cloudflare.WorkflowStepContext;
  *     return { attempt: context.attempt };
  *   }),
- * });
+ *   { retries: { limit: 3, delay: "5 seconds", backoff: "linear" } },
+ * );
  * ```
  *
  * @example Registering rollback
  * ```typescript
- * yield* Cloudflare.task({
- *   name: "reserve-inventory",
- *   effect: reserveInventory,
+ * yield* Cloudflare.task("reserve-inventory", reserveInventory, {
  *   rollback: ({ output }) =>
  *     output ? releaseInventory(output.reservationId) : Effect.void,
  *   rollbackConfig: { retries: { limit: 3, delay: "10 seconds" } },
@@ -479,14 +485,14 @@ export class WorkflowScope extends Context.Service<
  *   return Effect.fn(function* (input: { roomId: string; message: string }) {
  *     const { roomId, message } = input;
  *
- *     const stored = yield* Cloudflare.task({
- *       name: "kv-roundtrip",
- *       effect: Effect.gen(function* () {
+ *     const stored = yield* Cloudflare.task(
+ *       "kv-roundtrip",
+ *       Effect.gen(function* () {
  *         const key = `workflow:${roomId}`;
  *         yield* kv.put(key, message);
  *         return yield* kv.get(key);
  *       }).pipe(Effect.orDie),
- *     });
+ *     );
  *
  *     return stored;
  *   });
