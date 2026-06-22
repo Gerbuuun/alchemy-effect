@@ -367,7 +367,10 @@ test.provider(
       yield* stack.destroy();
       yield* assertQueueDeleted(source.queueUrl);
     }),
-  { timeout: 120_000 },
+  // Two deploy cycles plus two bounded (~40s each) SQS attribute-propagation
+  // waits and teardown can exceed 120s under full-suite load. The waits are
+  // bounded; give the end-to-end run headroom.
+  { timeout: 180_000 },
 );
 
 test.provider(
@@ -396,7 +399,10 @@ test.provider(
       yield* stack.destroy();
       yield* assertQueueDeleted(dlq.queueUrl);
     }),
-  { timeout: 120_000 },
+  // A deploy (two queues), a bounded (~40s) SQS attribute-propagation wait,
+  // teardown, and a deletion-propagation assertion can exceed 120s under
+  // full-suite load. The waits are all bounded; give the run headroom.
+  { timeout: 180_000 },
 );
 
 test.provider("SSE-SQS encryption enables sqs-managed key", (stack) =>
@@ -590,7 +596,10 @@ const waitForQueueAttributeMatch = Effect.fn(function* (
     }
   }).pipe(
     Effect.retry({
-      while: (e) => e._tag === "QueueAttributesNotReady",
+      // SQS is eventually consistent: a freshly-created queue can briefly
+      // 400 with `QueueDoesNotExist` on getQueueAttributes before it settles.
+      while: (e) =>
+        e._tag === "QueueAttributesNotReady" || e._tag === "QueueDoesNotExist",
       schedule: Schedule.fixed("500 millis").pipe(
         Schedule.both(Schedule.recurs(40)),
       ),
@@ -613,7 +622,10 @@ const waitForQueueAttributePredicate = Effect.fn(function* (
     }
   }).pipe(
     Effect.retry({
-      while: (e) => e._tag === "QueueAttributesNotReady",
+      // See `waitForQueueAttributeMatch`: ride out the brief post-create
+      // `QueueDoesNotExist` window as well as the predicate-not-yet-true case.
+      while: (e) =>
+        e._tag === "QueueAttributesNotReady" || e._tag === "QueueDoesNotExist",
       schedule: Schedule.fixed("1 second").pipe(
         Schedule.both(Schedule.recurs(40)),
       ),
@@ -672,8 +684,13 @@ const assertQueueDeleted = Effect.fn(function* (queueUrl: string) {
   }).pipe(
     Effect.flatMap(() => Effect.fail(new QueueStillExists())),
     Effect.retry({
+      // SQS DeleteQueue propagation takes up to ~60s. Poll on a fixed cadence
+      // rather than an unbounded exponential backoff, whose sleeps balloon
+      // (~100s cumulative by the 9th retry) and overshoot the test timeout.
       while: (e) => e._tag === "QueueStillExists",
-      schedule: Schedule.exponential(100),
+      schedule: Schedule.spaced("3 seconds").pipe(
+        Schedule.both(Schedule.recurs(30)),
+      ),
     }),
     Effect.catchTag("QueueDoesNotExist", () => Effect.void),
   );

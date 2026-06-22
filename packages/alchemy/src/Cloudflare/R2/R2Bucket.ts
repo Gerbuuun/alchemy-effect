@@ -405,24 +405,35 @@ export const R2BucketProvider = () =>
       const listCustomDomains = Effect.fnUntraced(function* (
         bucketName: string,
         jurisdiction: R2Bucket.Jurisdiction,
+        // `NoSuchBucket` after a *create* is endpoint-consistency lag worth
+        // retrying. During *enumeration* (`list`), a bucket that 404s is one a
+        // parallel suite just deleted — it's genuinely gone, so retrying the
+        // consistency schedule only burns ~3s per churned bucket and is what
+        // pushes an account-wide `list` past its timeout. Default to retrying
+        // (the reconcile path); opt out for enumeration.
+        options?: { retryMissing?: boolean },
       ) {
         const { accountId } = yield* yield* CloudflareEnvironment;
-        return yield* r2
-          .listBucketDomainCustoms({
-            accountId,
-            bucketName,
-            jurisdiction,
-          })
-          .pipe(
-            Effect.retry({
-              while: (e) => e._tag === "NoSuchBucket",
-              schedule: r2BucketEndpointConsistencySchedule,
-            }),
-            Effect.map((response) =>
-              response.domains.map(toCustomDomainAttributes),
-            ),
-            Effect.catchTag("NoSuchBucket", () => Effect.succeed(undefined)),
-          );
+        const fetch = r2.listBucketDomainCustoms({
+          accountId,
+          bucketName,
+          jurisdiction,
+        });
+        return yield* (
+          options?.retryMissing === false
+            ? fetch
+            : fetch.pipe(
+                Effect.retry({
+                  while: (e) => e._tag === "NoSuchBucket",
+                  schedule: r2BucketEndpointConsistencySchedule,
+                }),
+              )
+        ).pipe(
+          Effect.map((response) =>
+            response.domains.map(toCustomDomainAttributes),
+          ),
+          Effect.catchTag("NoSuchBucket", () => Effect.succeed(undefined)),
+        );
       });
 
       const reconcileCustomDomains = (
@@ -689,6 +700,9 @@ export const R2BucketProvider = () =>
                     (yield* listCustomDomains(
                       bucket.name,
                       bucket.jurisdiction,
+                      {
+                        retryMissing: false,
+                      },
                     )) ?? [];
                   const lifecycleRules = yield* r2
                     .getBucketLifecycle({
@@ -713,7 +727,16 @@ export const R2BucketProvider = () =>
                     domains,
                     lifecycleRules,
                   };
-                }),
+                }).pipe(
+                  // The custom-domain endpoint intermittently 500s ("Failed to
+                  // access or modify the bucket policy"). Ride out the transient
+                  // blip with a bounded retry rather than aborting the whole
+                  // enumeration.
+                  Effect.retry({
+                    while: (e) => e._tag === "InternalServerError",
+                    schedule: r2TransientServerErrorSchedule,
+                  }),
+                ),
               { concurrency: 10 },
             );
           }),
@@ -739,7 +762,11 @@ export const R2BucketProvider = () =>
           if (oldStorageClass !== (news.storageClass ?? "Standard")) {
             return {
               action: "update",
-              stables: oldName === name ? ["bucketName"] : undefined,
+              // `accountId` is always stable across an update (a name/account
+              // change is a `replace`); keep it now that `diff.stables`
+              // overrides `provider.stables` rather than merging with it.
+              stables:
+                oldName === name ? ["bucketName", "accountId"] : ["accountId"],
             } as const;
           }
           if (!deepEqual(olds.domains, news.domains)) {
@@ -921,6 +948,13 @@ export const R2BucketProvider = () =>
 // treated as terminal for idempotent deletes.
 const r2BucketEndpointConsistencySchedule = Schedule.exponential(100).pipe(
   Schedule.both(Schedule.recurs(5)),
+);
+
+// R2 sub-resource reads (notably the custom-domain endpoint, which touches the
+// bucket's public-access policy) can return a transient 500 ("Failed to access
+// or modify the bucket policy"). Ride out the blip with a short bounded retry.
+const r2TransientServerErrorSchedule = Schedule.exponential("500 millis").pipe(
+  Schedule.both(Schedule.recurs(6)),
 );
 
 // Distilled widened generated string enums to open unions (`string & {}`); the
